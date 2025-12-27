@@ -3,7 +3,7 @@ from __future__ import annotations
 import abc
 from dataclasses import dataclass
 
-from trading.types import Fill, Order, Side, TopOfBook
+from trading.types import Fill, Order, Side, TopOfBook, TradeTick
 
 
 @dataclass(frozen=True)
@@ -35,4 +35,13 @@ class Broker(abc.ABC):
         Paper broker uses this to simulate fills.
         """
         raise NotImplementedError
+
+    async def on_trade(self, market_id: str, trade: TradeTick) -> list[Fill]:
+        """
+        Called by the engine on trade prints (if available).
+        Default: no-op.
+        """
+        _ = market_id
+        _ = trade
+        return []
 

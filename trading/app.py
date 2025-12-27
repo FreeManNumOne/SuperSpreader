@@ -10,6 +10,7 @@ from connectors.polymarket.mock_stream import MockPolymarketStream
 from connectors.polymarket.ws_stream import PolymarketClobWebSocketStream
 from execution.base import OrderRequest
 from execution.paper import PaperBroker
+from execution.shadow import ShadowBroker
 from risk.portfolio import Portfolio
 from risk.rules import RiskEngine
 from storage.sqlite import SqliteStore
@@ -63,7 +64,14 @@ async def run_paper_trader(settings: Any, store: SqliteStore) -> None:
     state = SharedState()
     discovery = PolymarketMarketDiscovery()
     odds = MockOddsProvider()
-    broker = PaperBroker(store)
+    if str(getattr(settings, "execution_mode", "paper")) == "shadow":
+        broker = ShadowBroker(store)
+    else:
+        broker = PaperBroker(
+            store,
+            fill_model=str(getattr(settings, "paper_fill_model", "on_book_cross")),
+            min_rest_secs=float(getattr(settings, "paper_min_rest_secs", 0.0)),
+        )
     portfolio = Portfolio()
     risk = RiskEngine(settings)
     log = get_logger(__name__)
@@ -138,7 +146,14 @@ async def run_backtest(settings: Any, store: SqliteStore) -> None:
 
     state = SharedState()
     odds = MockOddsProvider(noise=0.0)
-    broker = PaperBroker(store)
+    if str(getattr(settings, "execution_mode", "paper")) == "shadow":
+        broker = ShadowBroker(store)
+    else:
+        broker = PaperBroker(
+            store,
+            fill_model=str(getattr(settings, "paper_fill_model", "on_book_cross")),
+            min_rest_secs=float(getattr(settings, "paper_min_rest_secs", 0.0)),
+        )
     portfolio = Portfolio()
     risk = RiskEngine(settings)
     log = get_logger(__name__)
@@ -224,6 +239,9 @@ async def _handle_feed_event(ctx: StrategyContext, ev: FeedEvent) -> None:
         async with ctx.state.lock:
             ctx.state.last_trade[ev.market_id] = ev.trade
             ctx.state.last_trade_update_ts = time.time()
+        fills = await ctx.broker.on_trade(ev.market_id, ev.trade)
+        if fills:
+            await _apply_fills(ctx, fills)
 
 
 async def _apply_fills(ctx: StrategyContext, fills: list[Fill]) -> None:

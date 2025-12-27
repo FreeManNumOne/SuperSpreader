@@ -124,6 +124,19 @@ Both options share common controls:
 - `GITHUB_PUBLISH_INTERVAL_SECS=60`
 - `GITHUB_PUBLISH_LOG_TAIL_LINES=200`
 
+### Live-data validation (shadow + stricter paper fills)
+
+Two useful knobs for bridging the gap between paper and production microstructure:
+
+- **Shadow execution** (log “would place/cancel”, never fill):
+  - `EXECUTION_MODE=shadow`
+  - Combine with `USE_LIVE_WS_FEED=1` to validate signal rate and order churn on real markets.
+
+- **More pessimistic paper fills** (only fill on trade prints through your limit):
+  - `EXECUTION_MODE=paper`
+  - `PAPER_FILL_MODEL=trade_through`
+  - Optionally `PAPER_MIN_REST_SECS=1.0` to require orders rest before they can fill.
+
 ### Tests
 
 ```bash
