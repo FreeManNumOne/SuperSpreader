@@ -38,6 +38,8 @@ cp .env.example .env
 RUN_MODE=scanner TRADE_MODE=paper python main.py
 ```
 
+When enabled (default), a local dashboard will start at `http://127.0.0.1:8000/` and auto-open in your browser.
+
 ### Run: paper trader (scanner + feed + strategies + paper execution)
 
 ```bash
@@ -61,9 +63,45 @@ USE_LIVE_WS_FEED=1 RUN_MODE=paper TRADE_MODE=paper python main.py
 RUN_MODE=backtest TRADE_MODE=paper python main.py
 ```
 
+### Run: using CLI flags (portable)
+
+You can also override the mode via CLI:
+
+```bash
+python main.py --mode scanner
+python main.py --mode paper
+python main.py --mode backtest
+```
+
+### Windows PowerShell examples
+
+```powershell
+# Scanner
+python main.py --mode scanner
+
+# Paper trader (default)
+python main.py --mode paper
+
+# Backtest
+python main.py --mode backtest
+
+# Optional: change dashboard port + disable auto-open
+$env:DASHBOARD_PORT="8010"
+$env:DASHBOARD_OPEN_BROWSER="0"
+python main.py --mode scanner
+```
+
 Backtest controls:
 - `BACKTEST_SPEED`: replay speed multiplier (e.g. 50.0)
 - `BACKTEST_START_TS` / `BACKTEST_END_TS`: optional unix timestamps
+
+### Dashboard settings
+
+Env vars (in `.env`):
+- `DASHBOARD_ENABLED=1`: start the local dashboard server
+- `DASHBOARD_HOST=127.0.0.1`
+- `DASHBOARD_PORT=8000`
+- `DASHBOARD_OPEN_BROWSER=1`: auto-open your browser on start
 
 ### Tests
 

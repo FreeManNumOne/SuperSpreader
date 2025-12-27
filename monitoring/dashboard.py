@@ -1,61 +1,58 @@
 from __future__ import annotations
 
 import asyncio
-import time
+import contextlib
+import webbrowser
 from typing import Any
 
-from rich.console import Console
-from rich.table import Table
+import uvicorn
 
+from monitoring.web_dashboard import build_app
 from utils.logging import get_logger
 
 
 async def run_dashboard_task(settings: Any, store: Any) -> None:
     """
-    Lightweight CLI dashboard (optional). Safe to run alongside any mode.
+    Local web dashboard (optional). Safe to run alongside any mode.
     """
     log = get_logger(__name__)
-    console = Console()
-
-    # Avoid noisy UI in scanner-only mode unless explicitly desired
-    enabled = True
-    if settings.run_mode == "scanner":
-        enabled = False
-
-    if not enabled:
+    if not bool(getattr(settings, "dashboard_enabled", True)):
         while True:
             await asyncio.sleep(3600)
 
-    while True:
-        try:
-            pnl = store.fetch_latest_pnl() or {}
-            positions = store.fetch_latest_positions(limit=20)
+    host = str(getattr(settings, "dashboard_host", "127.0.0.1"))
+    port = int(getattr(settings, "dashboard_port", 8000))
+    url = f"http://{host}:{port}/"
 
-            table = Table(title=f"Polymarket Trader ({settings.trade_mode}/{settings.run_mode}) @ {time.strftime('%X')}")
-            table.add_column("market_id", overflow="fold")
-            table.add_column("pos", justify="right")
-            table.add_column("avg", justify="right")
-            table.add_column("mark", justify="right")
-            table.add_column("uPnL", justify="right")
-            table.add_column("rPnL", justify="right")
+    app = build_app(settings, store)
+    config = uvicorn.Config(
+        app,
+        host=host,
+        port=port,
+        log_level="warning",
+        access_log=False,
+        lifespan="on",
+    )
+    server = uvicorn.Server(config)
 
-            for p in positions:
-                table.add_row(
-                    str(p["market_id"]),
-                    f'{p["position"]:.2f}',
-                    f'{p["avg_price"]:.3f}',
-                    f'{p["mark_price"]:.3f}',
-                    f'{p["unrealized_pnl"]:.2f}',
-                    f'{p["realized_pnl"]:.2f}',
-                )
+    async def _maybe_open_browser() -> None:
+        if not bool(getattr(settings, "dashboard_open_browser", True)):
+            return
+        # Give the server a moment to bind before opening.
+        await asyncio.sleep(0.6)
+        await asyncio.to_thread(webbrowser.open, url, new=2, autoraise=True)
 
-            console.clear()
-            console.print(table)
-            console.print(
-                f'Total PnL: {pnl.get("total_pnl", 0.0):.2f} (u={pnl.get("total_unrealized", 0.0):.2f}, r={pnl.get("total_realized", 0.0):.2f})'
-            )
-        except Exception:
-            log.exception("dashboard.error")
-
-        await asyncio.sleep(1.0)
+    open_task = asyncio.create_task(_maybe_open_browser())
+    try:
+        log.info("dashboard.start", url=url)
+        await server.serve()
+    except asyncio.CancelledError:
+        server.should_exit = True
+        raise
+    except Exception:
+        log.exception("dashboard.error")
+    finally:
+        open_task.cancel()
+        with contextlib.suppress(Exception):
+            await open_task
 
