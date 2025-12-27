@@ -13,9 +13,12 @@ from utils.logging import get_logger
 
 
 def _github_headers(token: str) -> dict[str, str]:
+    # GitHub supports multiple auth schemes. In practice:
+    # - Classic PATs (ghp_...) are most reliably accepted as `Authorization: token <pat>`.
+    # - Fine-grained PATs (github_pat_...) and OAuth tokens generally work with Bearer.
+    scheme = "token" if token.startswith("ghp_") else "Bearer"
     return {
-        # Use Bearer to support both classic and fine-grained tokens.
-        "Authorization": f"Bearer {token}",
+        "Authorization": f"{scheme} {token}",
         "Accept": "application/vnd.github+json",
         "User-Agent": "superspreader-local-repo-publisher",
     }
