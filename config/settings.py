@@ -31,6 +31,18 @@ def _get_bool(key: str, default: bool) -> bool:
     return v.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _read_first_nonempty_line(path: str) -> str | None:
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                s = line.strip()
+                if s:
+                    return s
+    except Exception:
+        return None
+    return None
+
+
 def _detect_github_repo_from_git_config() -> str | None:
     """
     Best-effort: infer "owner/name" from .git/config origin URL.
@@ -145,6 +157,7 @@ class Settings:
     github_publish_enabled: bool
     github_token: str | None
     github_gist_id: str | None
+    github_gist_id_file: str
     github_publish_interval_secs: int
     github_publish_log_tail_lines: int
 
@@ -197,6 +210,12 @@ class Settings:
         if (not github_repo) and github_repo_publish_enabled:
             github_repo = _detect_github_repo_from_git_config()
 
+        default_gist_id_file = os.path.join(".", "data", "github_gist_id.txt")
+        github_gist_id_file = (_get_env("GITHUB_GIST_ID_FILE", default_gist_id_file) or default_gist_id_file).strip()
+        github_gist_id = _get_env("GITHUB_GIST_ID")
+        if (not github_gist_id) and github_gist_id_file:
+            github_gist_id = _read_first_nonempty_line(github_gist_id_file)
+
         return cls(
             trade_mode=trade_mode,
             run_mode=run_mode,
@@ -237,7 +256,8 @@ class Settings:
             log_backup_count=_get_int("LOG_BACKUP_COUNT", 5),
             github_publish_enabled=github_publish_enabled,
             github_token=github_token,
-            github_gist_id=_get_env("GITHUB_GIST_ID"),
+            github_gist_id=github_gist_id,
+            github_gist_id_file=github_gist_id_file,
             github_publish_interval_secs=_get_int("GITHUB_PUBLISH_INTERVAL_SECS", 60),
             github_publish_log_tail_lines=_get_int("GITHUB_PUBLISH_LOG_TAIL_LINES", 200),
             github_repo_publish_enabled=github_repo_publish_enabled,

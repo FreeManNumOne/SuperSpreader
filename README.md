@@ -111,6 +111,7 @@ If you want to run locally but share how the bot is doing, you can publish a per
   - `GITHUB_PUBLISH_ENABLED=1`
   - `GH_TOKEN=...` (or `GITHUB_TOKEN`)
   - optional `GITHUB_GIST_ID=...` to update an existing gist
+  - optional `GITHUB_GIST_ID_FILE=./data/github_gist_id.txt` to keep reusing the same gist across restarts (recommended)
 
 - **Option B: write into a repo file** (creates a commit each update)
   - `GITHUB_REPO_PUBLISH_ENABLED=1`

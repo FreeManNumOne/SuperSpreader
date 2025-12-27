@@ -182,6 +182,14 @@ def _update_gist(token: str, gist_id: str, *, filename: str, content: str) -> No
     _raise_for_status_with_context(r, action="update_gist")
 
 
+def _write_text_file(path: str, content: str) -> None:
+    p = Path(path).expanduser()
+    if not p.is_absolute():
+        p = Path.cwd() / p
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content, encoding="utf-8")
+
+
 async def run_github_publisher_task(settings: Any, store: Any) -> None:
     """
     Optional background task: periodically publish a compact performance snapshot to a GitHub Gist.
@@ -209,6 +217,7 @@ async def run_github_publisher_task(settings: Any, store: Any) -> None:
             await asyncio.sleep(3600)
 
     gist_id = getattr(settings, "github_gist_id", None)
+    gist_id_file = getattr(settings, "github_gist_id_file", None)
     interval = int(getattr(settings, "github_publish_interval_secs", 60))
     tail_lines = int(getattr(settings, "github_publish_log_tail_lines", 200))
     log_file = getattr(settings, "log_file", None)
@@ -233,6 +242,12 @@ async def run_github_publisher_task(settings: Any, store: Any) -> None:
                 ref = await asyncio.to_thread(_create_gist, token, filename=filename, content=content)
                 gist_id = ref.gist_id
                 log.info("github_publish.gist_created", gist_id=gist_id, url=ref.html_url)
+                if gist_id_file:
+                    try:
+                        await asyncio.to_thread(_write_text_file, str(gist_id_file), str(gist_id) + "\n")
+                        log.info("github_publish.gist_id_saved", path=str(gist_id_file))
+                    except Exception:
+                        log.exception("github_publish.gist_id_save_error", path=str(gist_id_file))
             else:
                 await asyncio.to_thread(_update_gist, token, str(gist_id), filename=filename, content=content)
                 log.info("github_publish.updated", gist_id=str(gist_id))
