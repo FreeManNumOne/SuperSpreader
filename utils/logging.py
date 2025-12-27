@@ -5,6 +5,8 @@ import logging
 import sys
 import time
 from dataclasses import asdict, is_dataclass
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any
 
 
@@ -68,9 +70,28 @@ def configure_logging(settings: Any) -> None:
     root.handlers.clear()
     root.setLevel(level)
 
-    handler = logging.StreamHandler(sys.stdout)
+    fmt: logging.Formatter
     if getattr(settings, "json_logs", True):
-        handler.setFormatter(JsonFormatter())
+        fmt = JsonFormatter()
     else:
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
-    root.addHandler(handler)
+        fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+
+    stdout = logging.StreamHandler(sys.stdout)
+    stdout.setFormatter(fmt)
+    root.addHandler(stdout)
+
+    # Optional file logging (rotating). Useful for shipping tails to GitHub safely.
+    log_file = getattr(settings, "log_file", None)
+    if log_file:
+        p = Path(str(log_file)).expanduser()
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        p.parent.mkdir(parents=True, exist_ok=True)
+        fh = RotatingFileHandler(
+            str(p),
+            maxBytes=int(getattr(settings, "log_max_bytes", 10_000_000)),
+            backupCount=int(getattr(settings, "log_backup_count", 5)),
+            encoding="utf-8",
+        )
+        fh.setFormatter(fmt)
+        root.addHandler(fh)

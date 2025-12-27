@@ -257,6 +257,25 @@ def build_app(settings: Any, store: Any) -> FastAPI:
           </div>
         </div>
 
+        <div class="card col-4">
+          <div class="hd">
+            <div class="h">Recently Closed</div>
+            <div class="pill">flat • realized</div>
+          </div>
+          <div class="bd">
+            <table>
+              <thead>
+                <tr>
+                  <th class="mono">market_id</th>
+                  <th>rPnL</th>
+                </tr>
+              </thead>
+              <tbody id="flatRows"></tbody>
+            </table>
+            <div class="row2">Note: a position “closing” means qty returns to 0; it will disappear from Open Positions.</div>
+          </div>
+        </div>
+
         <div class="card col-6">
           <div class="hd">
             <div class="h">Recent Orders</div>
@@ -454,16 +473,32 @@ def build_app(settings: Any, store: Any) -> FastAPI:
         }}
       }}
 
+      function renderFlat(rows) {{
+        const tb = document.getElementById("flatRows");
+        tb.innerHTML = "";
+        for (const r of rows) {{
+          const rp = Number(r.realized_pnl ?? 0);
+          const cls = rp >= 0 ? "good" : "bad";
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td class="mono">${{escapeHtml((r.market_id||"--").toString())}}</td>
+            <td class="${{cls}}">${{fmtUsd(rp)}}</td>
+          `;
+          tb.appendChild(tr);
+        }}
+      }}
+
       function escapeHtml(s) {{
         return (s||"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#039;");
       }}
 
       async function refresh() {{
         try {{
-          const [summary, watch, pos, orders, fills] = await Promise.all([
+          const [summary, watch, pos, flat, orders, fills] = await Promise.all([
             getJson("/api/summary"),
             getJson("/api/watchlist?limit=30"),
             getJson("/api/positions?limit=20"),
+            getJson("/api/positions?limit=20&only_flat=1"),
             getJson("/api/orders?limit=25"),
             getJson("/api/fills?limit=25"),
           ]);
@@ -498,6 +533,7 @@ def build_app(settings: Any, store: Any) -> FastAPI:
 
           renderWatch(watch);
           renderPositions(pos);
+          renderFlat(flat);
           renderOrders(orders);
           renderFills(fills);
         }} catch (e) {{
@@ -543,9 +579,16 @@ def build_app(settings: Any, store: Any) -> FastAPI:
         return store.fetch_watchlist(limit=int(limit))
 
     @app.get("/api/positions", response_class=JSONResponse)
-    def positions(limit: int = 25) -> list[dict[str, Any]]:
+    def positions(limit: int = 25, only_flat: int = 0) -> list[dict[str, Any]]:
         rows = store.fetch_latest_positions(limit=int(limit))
-        # Keep only open positions in the UI view
+        if int(only_flat) == 1:
+            # Show only flat positions with non-zero realized pnl (recent closes / roundtrips)
+            return [
+                r
+                for r in rows
+                if float(r.get("position") or 0.0) == 0.0 and float(r.get("realized_pnl") or 0.0) != 0.0
+            ]
+        # Default: keep only open positions in the UI view
         return [r for r in rows if float(r.get("position") or 0.0) != 0.0]
 
     @app.get("/api/orders", response_class=JSONResponse)
