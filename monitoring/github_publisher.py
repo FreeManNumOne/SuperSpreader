@@ -133,9 +133,12 @@ def _build_report_md(store: Any, *, log_tail: str | None) -> str:
 
 
 def _github_headers(token: str) -> dict[str, str]:
+    # GitHub supports multiple auth schemes. In practice:
+    # - Classic PATs (ghp_...) are most reliably accepted as `Authorization: token <pat>`.
+    # - Fine-grained PATs (github_pat_...) and OAuth tokens generally work with Bearer.
+    scheme = "token" if token.startswith("ghp_") else "Bearer"
     return {
-        # Use Bearer to support both classic and fine-grained tokens.
-        "Authorization": f"Bearer {token}",
+        "Authorization": f"{scheme} {token}",
         "Accept": "application/vnd.github+json",
         "User-Agent": "superspreader-local-publisher",
     }
@@ -150,8 +153,20 @@ def _raise_for_status_with_context(r: requests.Response, *, action: str) -> None
             body = r.text
         except Exception:
             body = None
+        hint = ""
+        if r.status_code == 401:
+            hint = (
+                " Hint: GitHub returned 401 Bad credentials. Ensure GH_TOKEN/GITHUB_TOKEN is a valid GitHub token "
+                "(not expired/revoked) and is not wrapped in quotes in your .env (e.g. use GH_TOKEN=ghp_xxx, not "
+                "GH_TOKEN=\"ghp_xxx\")."
+            )
+        elif r.status_code == 403:
+            hint = (
+                " Hint: GitHub returned 403 Forbidden. Your token is valid but likely lacks permission. For classic "
+                "PATs, ensure the right scopes; for fine-grained PATs, grant access to the target resource."
+            )
         raise requests.HTTPError(
-            f"{action} failed: HTTP {r.status_code}. body={body!r}",
+            f"{action} failed: HTTP {r.status_code}. body={body!r}{hint}",
             response=r,
             request=getattr(e, "request", None),
         ) from e
