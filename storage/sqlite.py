@@ -120,6 +120,23 @@ class SqliteStore:
                   total_realized REAL,
                   total_pnl REAL
                 );
+
+                -- Scanner/watchlist for monitoring UI
+                CREATE TABLE IF NOT EXISTS scanner_snapshots (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  ts REAL,
+                  eligible_count INTEGER,
+                  top_count INTEGER
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_scanner_ts ON scanner_snapshots(ts);
+
+                -- Current ranked watchlist (top N), rewritten on every scan.
+                CREATE TABLE IF NOT EXISTS watchlist (
+                  rank INTEGER PRIMARY KEY,
+                  market_id TEXT,
+                  ts REAL
+                );
                 """
             )
             self._conn.commit()
@@ -268,6 +285,157 @@ class SqliteStore:
             if not row:
                 return None
             return {"ts": row[0], "total_unrealized": row[1], "total_realized": row[2], "total_pnl": row[3]}
+
+    def insert_scanner_snapshot(self, ts: float, eligible_count: int, top_count: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO scanner_snapshots(ts, eligible_count, top_count) VALUES(?,?,?)",
+                (float(ts), int(eligible_count), int(top_count)),
+            )
+            self._conn.commit()
+
+    def fetch_latest_scanner_snapshot(self) -> dict[str, Any] | None:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT ts, eligible_count, top_count FROM scanner_snapshots ORDER BY ts DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return {"ts": float(row[0]), "eligible_count": int(row[1]), "top_count": int(row[2])}
+
+    def update_watchlist(self, market_ids: list[str], ts: float | None = None) -> None:
+        ts0 = time.time() if ts is None else float(ts)
+        with self._lock:
+            self._conn.execute("DELETE FROM watchlist")
+            self._conn.executemany(
+                "INSERT INTO watchlist(rank, market_id, ts) VALUES(?,?,?)",
+                [(i + 1, str(mid), ts0) for i, mid in enumerate(market_ids)],
+            )
+            self._conn.commit()
+
+    def fetch_watchlist(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT w.rank, w.market_id, w.ts as watch_ts,
+                       m.question, m.event_id, m.active, m.end_ts, m.volume_24h_usd, m.liquidity_usd, m.updated_ts
+                FROM watchlist w
+                LEFT JOIN markets m ON m.market_id = w.market_id
+                ORDER BY w.rank ASC
+                LIMIT ?
+                """,
+                (int(limit),),
+            )
+            cols = [c[0] for c in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def fetch_markets(self, limit: int = 200, active_only: bool = True) -> list[dict[str, Any]]:
+        q = """
+            SELECT market_id, question, event_id, active, end_ts, volume_24h_usd, liquidity_usd, updated_ts
+            FROM markets
+        """
+        params: list[Any] = []
+        if active_only:
+            q += " WHERE active = 1"
+        q += " ORDER BY volume_24h_usd DESC, liquidity_usd DESC LIMIT ?"
+        params.append(int(limit))
+        with self._lock:
+            cur = self._conn.execute(q, tuple(params))
+            cols = [c[0] for c in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def fetch_markets_by_ids(self, market_ids: list[str]) -> list[dict[str, Any]]:
+        ids = [str(x) for x in market_ids if str(x).strip()]
+        if not ids:
+            return []
+        placeholders = ",".join(["?"] * len(ids))
+        q = f"""
+            SELECT market_id, question, event_id, active, end_ts, volume_24h_usd, liquidity_usd, updated_ts
+            FROM markets
+            WHERE market_id IN ({placeholders})
+        """
+        with self._lock:
+            cur = self._conn.execute(q, tuple(ids))
+            cols = [c[0] for c in cur.description]
+            rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+        by_id = {r["market_id"]: r for r in rows}
+        return [by_id.get(mid, {"market_id": mid}) for mid in ids]
+
+    def fetch_pnl_series(self, since_ts: float, limit: int = 4000) -> list[dict[str, Any]]:
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT ts, total_unrealized, total_realized, total_pnl
+                FROM pnl_snapshots
+                WHERE ts >= ?
+                ORDER BY ts ASC
+                LIMIT ?
+                """,
+                (float(since_ts), int(limit)),
+            )
+            cols = [c[0] for c in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def fetch_recent_orders(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT order_id, market_id, side, price, size, created_ts, status, filled_size, meta_json
+                FROM orders
+                ORDER BY created_ts DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            )
+            cols = [c[0] for c in cur.description]
+            out: list[dict[str, Any]] = []
+            for row in cur.fetchall():
+                d = dict(zip(cols, row))
+                try:
+                    d["meta"] = json.loads(d.get("meta_json") or "{}")
+                except Exception:
+                    d["meta"] = {}
+                out.append(d)
+            return out
+
+    def fetch_recent_fills(self, limit: int = 200) -> list[dict[str, Any]]:
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT fill_id, order_id, market_id, side, price, size, ts, meta_json
+                FROM fills
+                ORDER BY ts DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            )
+            cols = [c[0] for c in cur.description]
+            out: list[dict[str, Any]] = []
+            for row in cur.fetchall():
+                d = dict(zip(cols, row))
+                try:
+                    d["meta"] = json.loads(d.get("meta_json") or "{}")
+                except Exception:
+                    d["meta"] = {}
+                out.append(d)
+            return out
+
+    def fetch_latest_tape_ts(self) -> float | None:
+        with self._lock:
+            cur = self._conn.execute("SELECT MAX(ts) FROM tape")
+            row = cur.fetchone()
+            if not row or row[0] is None:
+                return None
+            return float(row[0])
+
+    def fetch_latest_market_update_ts(self) -> float | None:
+        with self._lock:
+            cur = self._conn.execute("SELECT MAX(updated_ts) FROM markets")
+            row = cur.fetchone()
+            if not row or row[0] is None:
+                return None
+            return float(row[0])
 
     def iter_tape(self, start_ts: float | None, end_ts: float | None):
         q = "SELECT ts, market_id, kind, payload_json FROM tape WHERE 1=1"

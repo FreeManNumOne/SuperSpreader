@@ -37,6 +37,9 @@ async def run_scanner(settings: Any, store: SqliteStore) -> None:
                 top_n=int(settings.top_n_markets),
             )
             store.upsert_markets([discovery.to_store_dict(m) for m in eligible])
+            ts = time.time()
+            store.insert_scanner_snapshot(ts=ts, eligible_count=len(eligible), top_count=len(top))
+            store.update_watchlist([m.market_id for m in top], ts=ts)
             async with state.lock:
                 state.markets = {m.market_id: m for m in eligible}
                 state.ranked_markets = [m.market_id for m in top]
@@ -85,6 +88,9 @@ async def run_paper_trader(settings: Any, store: SqliteStore) -> None:
                     top_n=int(settings.top_n_markets),
                 )
                 store.upsert_markets([discovery.to_store_dict(m) for m in eligible])
+                ts = time.time()
+                store.insert_scanner_snapshot(ts=ts, eligible_count=len(eligible), top_count=len(top))
+                store.update_watchlist([m.market_id for m in top], ts=ts)
                 async with state.lock:
                     state.markets = {m.market_id: m for m in eligible}
                     state.ranked_markets = [m.market_id for m in top]
