@@ -14,6 +14,22 @@ def _get_env(key: str, default: str | None = None) -> str | None:
     return val if val is not None else default
 
 
+def _normalize_env_secret(val: str | None) -> str | None:
+    """
+    Normalize secrets loaded from env/.env files.
+
+    Common failure mode: users wrap tokens in quotes in `.env` (e.g. GH_TOKEN="ghp_..."),
+    which some tooling preserves verbatim. GitHub treats the quotes as part of the token,
+    causing HTTP 401 Bad credentials.
+    """
+    if val is None:
+        return None
+    s = val.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in {"'", '"'}:
+        s = s[1:-1].strip()
+    return s or None
+
+
 def _get_int(key: str, default: int) -> int:
     v = _get_env(key)
     return default if v is None or v == "" else int(v)
@@ -96,7 +112,7 @@ def _detect_github_token_from_gh_cli() -> str | None:
     if cp.returncode != 0:
         return None
     tok = (cp.stdout or "").strip()
-    return tok or None
+    return _normalize_env_secret(tok)
 
 
 @dataclass(frozen=True)
@@ -200,7 +216,7 @@ class Settings:
         github_publish_enabled = _get_bool("GITHUB_PUBLISH_ENABLED", False)
         github_repo_publish_enabled = _get_bool("GITHUB_REPO_PUBLISH_ENABLED", False)
 
-        github_token = _get_env("GITHUB_TOKEN") or _get_env("GH_TOKEN")
+        github_token = _normalize_env_secret(_get_env("GITHUB_TOKEN") or _get_env("GH_TOKEN"))
         if not github_token and (github_publish_enabled or github_repo_publish_enabled):
             github_token = _detect_github_token_from_gh_cli()
 
