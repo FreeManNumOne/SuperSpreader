@@ -26,10 +26,16 @@ class MarketMakingStrategy(Strategy):
         if tob.best_bid is None or tob.best_ask is None:
             return
 
-        # Fair: external if available, otherwise mid
-        ext = await ctx.odds.get_fair_prob(m)
-        fair = prob_to_price(ext.fair_prob)
         mid = 0.5 * (tob.best_bid + tob.best_ask)
+        # Fair:
+        # - In production you might center quotes around an external fair value model.
+        # - In this repo's paper/default setup, the ExternalOdds provider is a mock and can be
+        #   completely unrelated to the current book, which would place quotes far away and
+        #   result in no fills/position changes.
+        # So: only trust external fair when it is *not* the mock provider.
+        ext = await ctx.odds.get_fair_prob(m)
+        ext_fair = prob_to_price(ext.fair_prob)
+        fair = mid if str(getattr(ext, "source", "")).lower() == "mock" else ext_fair
 
         # Inventory skew: shift quotes away from current inventory direction
         pos = ctx.portfolio.positions.get(market_id)
