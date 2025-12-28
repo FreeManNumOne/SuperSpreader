@@ -121,6 +121,7 @@ class Settings:
     trade_mode: str  # paper|live
     run_mode: str  # scanner|paper|backtest
     execution_mode: str  # paper|shadow (shadow logs orders, no fills)
+    disallow_mock_data: bool
 
     # Polymarket
     polymarket_host: str
@@ -226,6 +227,7 @@ class Settings:
         if trade_mode not in {"paper", "live"}:
             raise ValueError("TRADE_MODE must be paper|live")
         run_mode = (_get_env("RUN_MODE", "paper") or "paper").lower()
+        disallow_mock_data = _get_bool("DISALLOW_MOCK_DATA", False)
 
         execution_mode = (_get_env("EXECUTION_MODE", "paper") or "paper").lower()
         if execution_mode not in {"paper", "shadow"}:
@@ -257,19 +259,23 @@ class Settings:
         if (not github_gist_id) and github_gist_id_file:
             github_gist_id = _read_first_nonempty_line(github_gist_id_file)
 
+        polymarket_feed = (_get_env("POLYMARKET_FEED") or "").strip().lower() or (
+            "gamma" if _get_bool("USE_LIVE_WS_FEED", False) else "mock"
+        )
+        if disallow_mock_data and polymarket_feed == "mock":
+            raise ValueError("DISALLOW_MOCK_DATA=true but POLYMARKET_FEED resolved to 'mock' (set POLYMARKET_FEED=gamma|ws)")
+
         return cls(
             trade_mode=trade_mode,
             run_mode=run_mode,
             execution_mode=execution_mode,
+            disallow_mock_data=disallow_mock_data,
             polymarket_host=_get_env("POLYMARKET_HOST", "https://clob.polymarket.com") or "",
             # Polymarket has historically changed websocket endpoints.
             # Current public endpoint used by the website:
             #   wss://ws-live-data.polymarket.com
             polymarket_ws=_get_env("POLYMARKET_WS", "wss://ws-live-data.polymarket.com") or "",
-            polymarket_feed=(
-                (_get_env("POLYMARKET_FEED") or "").strip().lower()
-                or ("gamma" if _get_bool("USE_LIVE_WS_FEED", False) else "mock")
-            ),
+            polymarket_feed=polymarket_feed,
             polymarket_chain_id=_get_int("POLYMARKET_CHAIN_ID", 137),
             polymarket_private_key=_get_env("POLYMARKET_PRIVATE_KEY"),
             polymarket_api_key=_get_env("POLYMARKET_API_KEY"),

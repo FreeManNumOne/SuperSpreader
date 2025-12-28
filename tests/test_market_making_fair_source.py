@@ -109,3 +109,9 @@ async def test_market_making_ignores_mock_external_fair_and_centers_on_mid(tmp_p
     assert buy.price < 0.1
     assert sell.price < 0.1
 
+    # And since we fell back to book mid, we should not log/propagate "external_source":"mock".
+    assert buy.meta["source"] == "book_mid"
+    assert sell.meta["source"] == "book_mid"
+    assert "external_source" not in buy.meta
+    assert "external_source" not in sell.meta
+

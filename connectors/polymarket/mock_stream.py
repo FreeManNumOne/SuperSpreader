@@ -4,11 +4,10 @@ import asyncio
 import random
 import time
 from dataclasses import asdict
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 from storage.sqlite import SqliteStore
 from trading.feed import BookEvent, FeedEvent, TradeEvent
-from trading.state import SharedState
 from trading.types import TopOfBook, TradeTick
 from utils.logging import get_logger
 from utils.pricing import clamp
@@ -27,17 +26,16 @@ class MockPolymarketStream:
         self._log = get_logger(__name__)
         self._mid: dict[str, float] = {}
 
-    async def events(self, state: SharedState) -> AsyncIterator[FeedEvent]:
+    async def events(self, market_ids: Callable[[], list[str]]) -> AsyncIterator[FeedEvent]:
         while True:
             await asyncio.sleep(self._dt)
-            async with state.lock:
-                market_ids = list(state.ranked_markets)
+            mids = list(market_ids() or [])
 
-            if not market_ids:
+            if not mids:
                 continue
 
             # Update a subset each tick to approximate async feeds
-            for market_id in self._rng.sample(market_ids, k=min(5, len(market_ids))):
+            for market_id in self._rng.sample(mids, k=min(5, len(mids))):
                 mid = self._mid.get(market_id)
                 if mid is None:
                     mid = 0.5 + self._rng.uniform(-0.15, 0.15)
