@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 
 from execution.base import OrderRequest
@@ -25,6 +26,12 @@ class MarketMakingStrategy(Strategy):
             return
         if tob.best_bid is None or tob.best_ask is None:
             return
+
+        # Tick size / minimum price increment.
+        # Default is 0.001 (Polymarket frequently trades in mills).
+        tick = float(getattr(ctx.settings, "price_tick", 0.001) or 0.001)
+        if not (1e-6 <= tick <= 0.5):
+            tick = 0.001
 
         mid = 0.5 * (tob.best_bid + tob.best_ask)
         if bool(getattr(ctx.settings, "disallow_mock_data", False)):
@@ -59,17 +66,36 @@ class MarketMakingStrategy(Strategy):
         inv = 0.0 if pos is None else float(pos.qty)
         max_pos = max(1.0, float(ctx.settings.max_pos_per_market))
         inv_frac = clamp(inv / max_pos, -1.0, 1.0)
-        width = float(ctx.settings.mm_quote_width)
+        # Ensure a minimum width so bid/ask remain separable on the tick grid.
+        width = max(float(ctx.settings.mm_quote_width), 2.0 * tick)
         skew = -inv_frac * float(ctx.settings.mm_inventory_skew) * width
 
-        target_bid = clamp(fair + skew - width / 2.0, 0.01, 0.99)
-        target_ask = clamp(fair + skew + width / 2.0, 0.01, 0.99)
+        # Target quotes around fair, but:
+        # - do not hard-clamp to 0.01 (many Polymarket markets trade below 1c)
+        # - never post crossing quotes (maker-style)
+        target_bid = clamp(fair + skew - width / 2.0, tick, 1.0 - tick)
+        target_ask = clamp(fair + skew + width / 2.0, tick, 1.0 - tick)
+
+        # Enforce maker quotes vs current TOB (never cross the spread).
+        # This prevents accidental taker behavior in paper mode that can create one-sided inventory.
+        target_bid = min(target_bid, float(tob.best_ask) - tick)
+        target_ask = max(target_ask, float(tob.best_bid) + tick)
+
+        # Round to tick grid conservatively:
+        # - bids round DOWN
+        # - asks round UP
+        target_bid = math.floor(target_bid / tick) * tick
+        target_ask = math.ceil(target_ask / tick) * tick
+
+        # Re-apply safety clamps after rounding.
+        target_bid = clamp(target_bid, tick, 1.0 - tick)
+        target_ask = clamp(target_ask, tick, 1.0 - tick)
+        # Re-enforce maker constraints post-rounding (rounding can re-cross on edge cases).
+        target_bid = min(target_bid, float(tob.best_ask) - tick)
+        target_ask = max(target_ask, float(tob.best_bid) + tick)
+
         if target_bid >= target_ask:
             return
-
-        tick = 0.001
-        target_bid = round(target_bid / tick) * tick
-        target_ask = round(target_ask / tick) * tick
 
         now = time.time()
         min_life = float(ctx.settings.mm_min_quote_life_secs)

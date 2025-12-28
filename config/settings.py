@@ -148,6 +148,10 @@ class Settings:
     base_order_size: float
     min_trade_cooldown_secs: float
 
+    # Pricing / microstructure
+    # Minimum price increment (tick size) used for quoting/rounding.
+    price_tick: float
+
     mm_quote_width: float
     mm_inventory_skew: float
     mm_min_quote_life_secs: float
@@ -292,6 +296,7 @@ class Settings:
             latency_bps=_get_float("LATENCY_BPS", 5.0),
             base_order_size=_get_float("BASE_ORDER_SIZE", 10.0),
             min_trade_cooldown_secs=_get_float("MIN_TRADE_COOLDOWN_SECS", 5.0),
+            price_tick=_get_float("PRICE_TICK", 0.001),
             mm_quote_width=_get_float("MM_QUOTE_WIDTH", 0.02),
             mm_inventory_skew=_get_float("MM_INVENTORY_SKEW", 0.5),
             mm_min_quote_life_secs=_get_float("MM_MIN_QUOTE_LIFE_SECS", 2.0),
