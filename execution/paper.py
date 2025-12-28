@@ -15,8 +15,10 @@ class PaperBroker(Broker):
     """
     Paper trading execution:
     - Keeps an in-memory order blotter.
-    - Simulates immediate fills when an order crosses the spread at the time of placement,
-      otherwise fills when subsequent book updates cross the order price.
+    Fill models:
+    - maker_touch: simulate passive fills at the touch using TOB movements (works with TOB-only feeds)
+    - on_book_cross: fill only when the TOB crosses your limit (taker-ish; maker quotes rarely fill)
+    - trade_through: fill resting limits only when trade prints through your price (requires trades feed)
     """
 
     def __init__(
@@ -30,6 +32,7 @@ class PaperBroker(Broker):
         self._orders: dict[str, Order] = {}
         self._by_market: dict[str, set[str]] = {}
         self._meta_by_order_id: dict[str, dict] = {}
+        self._last_tob: dict[str, TopOfBook] = {}
         self._lock = asyncio.Lock()
         self._log = get_logger(__name__)
         self._fill_model = str(fill_model or "on_book_cross")
@@ -80,10 +83,15 @@ class PaperBroker(Broker):
             await self.cancel(oid)
 
     async def on_book(self, market_id: str, tob: TopOfBook) -> list[Fill]:
-        if self._fill_model != "on_book_cross":
+        if self._fill_model not in {"on_book_cross", "maker_touch"}:
             return []
         fills: list[Fill] = []
+        prev_tob: TopOfBook | None = None
+        # Epsilon for float comparisons; prices are typically ticked (e.g. 0.001) but not exactly representable.
+        eps = 1e-4
         async with self._lock:
+            prev_tob = self._last_tob.get(market_id)
+            self._last_tob[market_id] = tob
             oids = list(self._by_market.get(market_id, set()))
             for oid in oids:
                 o = self._orders.get(oid)
@@ -92,28 +100,59 @@ class PaperBroker(Broker):
                 if self._min_rest_secs > 0 and (time.time() - float(o.created_ts)) < self._min_rest_secs:
                     continue
                 fill_price = None
-                # More conservative than "fill at the new TOB":
-                # - If you cross immediately (aggressive), you pay the touch (ask for buy, bid for sell).
-                # - If you were resting and the book later crosses through your price, assume you fill at
-                #   your limit (no free price improvement).
-                if o.side == "buy" and tob.best_ask is not None and o.price >= tob.best_ask:
-                    crossed_on_entry = float(o.price) > float(tob.best_ask)
-                    fill_price = float(tob.best_ask) if crossed_on_entry else float(o.price)
-                if o.side == "sell" and tob.best_bid is not None and o.price <= tob.best_bid:
-                    crossed_on_entry = float(o.price) < float(tob.best_bid)
-                    fill_price = float(tob.best_bid) if crossed_on_entry else float(o.price)
+                if self._fill_model == "on_book_cross":
+                    # More conservative than "fill at the new TOB":
+                    # - If you cross immediately (aggressive), you pay the touch (ask for buy, bid for sell).
+                    # - If you were resting and the book later crosses through your price, assume you fill at
+                    #   your limit (no free price improvement).
+                    if o.side == "buy" and tob.best_ask is not None and o.price >= tob.best_ask:
+                        crossed_on_entry = float(o.price) > float(tob.best_ask)
+                        fill_price = float(tob.best_ask) if crossed_on_entry else float(o.price)
+                    if o.side == "sell" and tob.best_bid is not None and o.price <= tob.best_bid:
+                        crossed_on_entry = float(o.price) < float(tob.best_bid)
+                        fill_price = float(tob.best_bid) if crossed_on_entry else float(o.price)
+                else:
+                    # maker_touch:
+                    # - Still allow "obvious" taker-style fills if you cross the spread (sanity).
+                    # - Additionally simulate passive fills when you were at the touch and the touch moves away.
+                    #
+                    # This is intentionally conservative and works with TOB-only feeds (e.g. gamma poll).
+                    if o.side == "buy" and tob.best_ask is not None and o.price >= tob.best_ask:
+                        fill_price = float(tob.best_ask) if float(o.price) > float(tob.best_ask) else float(o.price)
+                    if o.side == "sell" and tob.best_bid is not None and o.price <= tob.best_bid:
+                        fill_price = float(tob.best_bid) if float(o.price) < float(tob.best_bid) else float(o.price)
+
+                    if fill_price is None and prev_tob is not None:
+                        if o.side == "buy" and prev_tob.best_bid is not None and tob.best_bid is not None:
+                            was_at_touch = abs(float(o.price) - float(prev_tob.best_bid)) <= eps
+                            # If the best bid moved down while we were the best bid, assume we were hit.
+                            if was_at_touch and float(tob.best_bid) < (float(o.price) - eps):
+                                fill_price = float(o.price)
+                        if o.side == "sell" and prev_tob.best_ask is not None and tob.best_ask is not None:
+                            was_at_touch = abs(float(o.price) - float(prev_tob.best_ask)) <= eps
+                            # If the best ask moved up while we were the best ask, assume we were lifted.
+                            if was_at_touch and float(tob.best_ask) > (float(o.price) + eps):
+                                fill_price = float(o.price)
                 if fill_price is None:
                     continue
 
                 meta = dict(self._meta_by_order_id.get(o.order_id, {}))
                 meta.update(
                     {
-                        "fill_model": "on_book_cross",
+                        "fill_model": self._fill_model,
                         "tob_best_bid": tob.best_bid,
                         "tob_best_ask": tob.best_ask,
                         "tob_ts": tob.ts,
                     }
                 )
+                if self._fill_model == "maker_touch" and prev_tob is not None:
+                    meta.update(
+                        {
+                            "prev_tob_best_bid": prev_tob.best_bid,
+                            "prev_tob_best_ask": prev_tob.best_ask,
+                            "prev_tob_ts": prev_tob.ts,
+                        }
+                    )
                 f = Fill(
                     fill_id=str(uuid.uuid4()),
                     order_id=o.order_id,

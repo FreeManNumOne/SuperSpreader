@@ -66,8 +66,12 @@ class MarketMakingStrategy(Strategy):
         inv = 0.0 if pos is None else float(pos.qty)
         max_pos = max(1.0, float(ctx.settings.max_pos_per_market))
         inv_frac = clamp(inv / max_pos, -1.0, 1.0)
-        # Ensure a minimum width so bid/ask remain separable on the tick grid.
-        width = max(float(ctx.settings.mm_quote_width), 2.0 * tick)
+        # Quote width:
+        # - Keep a configured "cap" (mm_quote_width) but don't be unnecessarily wide vs the live spread.
+        # - A too-wide width results in quotes far from the touch => almost no fills.
+        spread = float(tob.best_ask) - float(tob.best_bid)
+        width_cap = max(float(ctx.settings.mm_quote_width), 2.0 * tick)
+        width = min(width_cap, max(spread + 2.0 * tick, 6.0 * tick))
         skew = -inv_frac * float(ctx.settings.mm_inventory_skew) * width
 
         # Target quotes around fair, but:
@@ -75,6 +79,16 @@ class MarketMakingStrategy(Strategy):
         # - never post crossing quotes (maker-style)
         target_bid = clamp(fair + skew - width / 2.0, tick, 1.0 - tick)
         target_ask = clamp(fair + skew + width / 2.0, tick, 1.0 - tick)
+
+        # Optional: join the touch to increase fill probability.
+        # Inventory-aware guardrail: if we are already significantly long/short, don't force joining
+        # the side that would further increase exposure.
+        join_touch = bool(getattr(ctx.settings, "mm_join_touch", True))
+        if join_touch:
+            if inv_frac <= 0.25:
+                target_bid = max(target_bid, float(tob.best_bid))
+            if inv_frac >= -0.25:
+                target_ask = min(target_ask, float(tob.best_ask))
 
         # Enforce maker quotes vs current TOB (never cross the spread).
         # This prevents accidental taker behavior in paper mode that can create one-sided inventory.
@@ -183,7 +197,8 @@ class MarketMakingStrategy(Strategy):
 
         # Cancel/replace: for this scaffold, we simply cancel and place a new order when needed.
         needs_replace = oid is None or (now - last_ts) >= min_life
-        if oid is not None and last_px is not None and abs(float(last_px) - float(target_price)) >= 0.002:
+        reprice_threshold = float(getattr(ctx.settings, "mm_reprice_threshold", 0.001) or 0.001)
+        if oid is not None and last_px is not None and abs(float(last_px) - float(target_price)) >= max(reprice_threshold, 1e-6):
             needs_replace = True
         if not needs_replace:
             return

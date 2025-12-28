@@ -156,9 +156,11 @@ class Settings:
     mm_inventory_skew: float
     mm_min_quote_life_secs: float
     mm_max_orders_per_market: int
+    mm_join_touch: bool
+    mm_reprice_threshold: float
 
     # Paper trading realism
-    paper_fill_model: str  # on_book_cross|trade_through
+    paper_fill_model: str  # maker_touch|on_book_cross|trade_through
     paper_min_rest_secs: float
     # Paper state persistence (SQLite-backed telemetry)
     paper_rehydrate_portfolio: bool
@@ -237,9 +239,9 @@ class Settings:
         if execution_mode not in {"paper", "shadow"}:
             raise ValueError("EXECUTION_MODE must be paper|shadow")
 
-        paper_fill_model = (_get_env("PAPER_FILL_MODEL", "on_book_cross") or "on_book_cross").strip().lower()
-        if paper_fill_model not in {"on_book_cross", "trade_through"}:
-            raise ValueError("PAPER_FILL_MODEL must be on_book_cross|trade_through")
+        paper_fill_model = (_get_env("PAPER_FILL_MODEL", "maker_touch") or "maker_touch").strip().lower()
+        if paper_fill_model not in {"maker_touch", "on_book_cross", "trade_through"}:
+            raise ValueError("PAPER_FILL_MODEL must be maker_touch|on_book_cross|trade_through")
         # Portable default: keep SQLite under the project working directory.
         # Users can override via SQLITE_PATH in their .env.
         default_sqlite_path = os.path.join(".", "data", "polymarket_trader.sqlite")
@@ -286,7 +288,8 @@ class Settings:
             polymarket_api_secret=_get_env("POLYMARKET_API_SECRET"),
             polymarket_api_passphrase=_get_env("POLYMARKET_API_PASSPHRASE"),
             use_live_ws_feed=_get_bool("USE_LIVE_WS_FEED", False),
-            top_n_markets=_get_int("TOP_N_MARKETS", 20),
+            # Wider default watchlist for more opportunities; still filtered by volume/liquidity.
+            top_n_markets=_get_int("TOP_N_MARKETS", 50),
             min_24h_volume_usd=_get_float("MIN_24H_VOLUME_USD", 20000.0),
             min_liquidity_usd=_get_float("MIN_LIQUIDITY_USD", 5000.0),
             market_refresh_secs=_get_int("MARKET_REFRESH_SECS", 60),
@@ -297,10 +300,13 @@ class Settings:
             base_order_size=_get_float("BASE_ORDER_SIZE", 10.0),
             min_trade_cooldown_secs=_get_float("MIN_TRADE_COOLDOWN_SECS", 5.0),
             price_tick=_get_float("PRICE_TICK", 0.001),
-            mm_quote_width=_get_float("MM_QUOTE_WIDTH", 0.02),
+            # Tighter default makes market-making quotes competitive at the touch more often.
+            mm_quote_width=_get_float("MM_QUOTE_WIDTH", 0.01),
             mm_inventory_skew=_get_float("MM_INVENTORY_SKEW", 0.5),
-            mm_min_quote_life_secs=_get_float("MM_MIN_QUOTE_LIFE_SECS", 2.0),
+            mm_min_quote_life_secs=_get_float("MM_MIN_QUOTE_LIFE_SECS", 1.0),
             mm_max_orders_per_market=_get_int("MM_MAX_ORDERS_PER_MARKET", 2),
+            mm_join_touch=_get_bool("MM_JOIN_TOUCH", True),
+            mm_reprice_threshold=_get_float("MM_REPRICE_THRESHOLD", 0.001),
             paper_fill_model=paper_fill_model,
             paper_min_rest_secs=_get_float("PAPER_MIN_REST_SECS", 0.0),
             paper_rehydrate_portfolio=_get_bool("PAPER_REHYDRATE_PORTFOLIO", True),
