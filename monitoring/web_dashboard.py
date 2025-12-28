@@ -604,6 +604,21 @@ def build_app(settings: Any, store: Any) -> FastAPI:
           setStatus(true, "live");
           hideBanner();
 
+          // Surface blocking runtime errors (feed/scanner/etc) cleanly.
+          const blocking = summary?.health?.blocking || [];
+          if (blocking.length) {{
+            const lines = blocking
+              .slice(0, 6)
+              .map((x) => `${{x.component}}: ${{x.message}}`)
+              .join("\\n");
+            const detail = blocking
+              .slice(0, 6)
+              .map((x) => `- ${{x.component}} @ ${{fmtAgo(x.ts)}}\\n  ${{x.message}}\\n  ${{x.detail || ""}}`)
+              .join("\\n");
+            showBanner("Blocking error(s) detected — trading may be paused", lines);
+            document.getElementById("errBannerDetail").textContent = detail;
+          }}
+
           const pnl = summary.pnl || {{}};
           const total = Number(pnl.total_pnl ?? 0);
           document.getElementById("pnlTotal").textContent = fmtUsd(total);
@@ -679,6 +694,9 @@ def build_app(settings: Any, store: Any) -> FastAPI:
         pnl = store.fetch_latest_pnl()
         scanner = store.fetch_latest_scanner_snapshot()
         positions = store.fetch_latest_positions(limit=500)
+        health = store.fetch_runtime_statuses()
+        # Consider "blocking" if any component reports error.
+        blocking = [h for h in health.values() if str(h.get("level", "")).lower() == "error"]
         return {
             "ts": time.time(),
             "mode": getattr(settings, "run_mode", None),
@@ -690,7 +708,15 @@ def build_app(settings: Any, store: Any) -> FastAPI:
                 "markets_updated_ts": store.fetch_latest_market_update_ts(),
                 "tape_latest_ts": store.fetch_latest_tape_ts(),
             },
+            "health": {
+                "components": health,
+                "blocking": blocking,
+            },
         }
+
+    @app.get("/api/health", response_class=JSONResponse)
+    def health() -> dict[str, Any]:
+        return {"ts": time.time(), "components": store.fetch_runtime_statuses()}
 
     @app.get("/api/watchlist", response_class=JSONResponse)
     def watchlist(limit: int = 30) -> list[dict[str, Any]]:

@@ -137,6 +137,16 @@ class SqliteStore:
                   market_id TEXT,
                   ts REAL
                 );
+
+                -- Runtime health/status (for dashboard surfacing of blocking errors).
+                -- One row per component, always overwritten with latest status.
+                CREATE TABLE IF NOT EXISTS runtime_status (
+                  component TEXT PRIMARY KEY,
+                  ts REAL,
+                  level TEXT,
+                  message TEXT,
+                  detail TEXT
+                );
                 """
             )
             self._conn.commit()
@@ -481,6 +491,58 @@ class SqliteStore:
             if not row or row[0] is None:
                 return None
             return float(row[0])
+
+    def upsert_runtime_status(
+        self,
+        *,
+        component: str,
+        level: str,
+        message: str,
+        detail: str | None = None,
+        ts: float | None = None,
+    ) -> None:
+        """
+        Record latest runtime status for a component (shown on dashboard).
+        Levels: ok|warn|error (free-form, but those are expected by the UI).
+        """
+        c = str(component or "").strip()[:128]
+        if not c:
+            return
+        lvl = str(level or "").strip().lower()[:16] or "ok"
+        msg = (str(message or "").strip() or "--")[:1000]
+        det = None if detail is None else (str(detail)[:4000])
+        t0 = time.time() if ts is None else float(ts)
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO runtime_status(component, ts, level, message, detail)
+                VALUES(?,?,?,?,?)
+                ON CONFLICT(component) DO UPDATE SET
+                  ts=excluded.ts,
+                  level=excluded.level,
+                  message=excluded.message,
+                  detail=excluded.detail
+                """,
+                (c, float(t0), lvl, msg, det),
+            )
+            self._conn.commit()
+
+    def fetch_runtime_statuses(self) -> dict[str, dict[str, Any]]:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT component, ts, level, message, detail FROM runtime_status ORDER BY ts DESC"
+            )
+            rows = cur.fetchall()
+        out: dict[str, dict[str, Any]] = {}
+        for component, ts, level, message, detail in rows:
+            out[str(component)] = {
+                "component": str(component),
+                "ts": float(ts) if ts is not None else None,
+                "level": str(level or ""),
+                "message": str(message or ""),
+                "detail": str(detail or ""),
+            }
+        return out
 
     def iter_tape(self, start_ts: float | None, end_ts: float | None):
         q = "SELECT ts, market_id, kind, payload_json FROM tape WHERE 1=1"

@@ -125,6 +125,7 @@ class Settings:
     # Polymarket
     polymarket_host: str
     polymarket_ws: str
+    polymarket_feed: str  # mock|gamma|ws
     polymarket_chain_id: int
     polymarket_private_key: str | None
     polymarket_api_key: str | None
@@ -258,7 +259,14 @@ class Settings:
             run_mode=run_mode,
             execution_mode=execution_mode,
             polymarket_host=_get_env("POLYMARKET_HOST", "https://clob.polymarket.com") or "",
-            polymarket_ws=_get_env("POLYMARKET_WS", "wss://ws-subscriptions-clob.polymarket.com/ws") or "",
+            # Polymarket has historically changed websocket endpoints.
+            # Current public endpoint used by the website:
+            #   wss://ws-live-data.polymarket.com
+            polymarket_ws=_get_env("POLYMARKET_WS", "wss://ws-live-data.polymarket.com") or "",
+            polymarket_feed=(
+                (_get_env("POLYMARKET_FEED") or "").strip().lower()
+                or ("gamma" if _get_bool("USE_LIVE_WS_FEED", False) else "mock")
+            ),
             polymarket_chain_id=_get_int("POLYMARKET_CHAIN_ID", 137),
             polymarket_private_key=_get_env("POLYMARKET_PRIVATE_KEY"),
             polymarket_api_key=_get_env("POLYMARKET_API_KEY"),
