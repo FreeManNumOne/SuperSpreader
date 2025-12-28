@@ -39,6 +39,9 @@ class PolymarketGammaPollStream:
         self._poll = max(0.25, float(poll_secs))
         self._limit = int(limit)
         self._log = get_logger(__name__)
+        # Track last observed top-of-book (by market). Note: Gamma often leaves bestBid/bestAsk
+        # unchanged for long stretches. We still need to "refresh" observation time so risk
+        # circuit breakers don't trip purely due to lack of price movement.
         self._last: dict[str, tuple[float | None, float | None]] = {}
 
     async def events(self, market_ids_provider) -> AsyncIterator[FeedEvent]:
@@ -64,7 +67,8 @@ class PolymarketGammaPollStream:
                         if isinstance(m, dict) and (m.get("id") is not None):
                             by_id[str(m.get("id"))] = m
 
-                updated = 0
+                changed = 0
+                observed = 0
                 now = time.time()
                 for market_id in want:
                     m = by_id.get(market_id)
@@ -84,8 +88,6 @@ class PolymarketGammaPollStream:
 
                     prev = self._last.get(market_id)
                     cur = (best_bid, best_ask)
-                    if prev == cur:
-                        continue
                     self._last[market_id] = cur
 
                     tob = TopOfBook(
@@ -95,15 +97,19 @@ class PolymarketGammaPollStream:
                         best_ask_size=None,
                         ts=now,
                     )
-                    self._store.insert_tape(tob.ts, market_id, "tob", asdict(tob))
-                    updated += 1
+                    # Only persist to tape when the book meaningfully changes; but always emit
+                    # a BookEvent so downstream state refreshes tob.ts (prevents false feed_lag).
+                    if prev != cur:
+                        self._store.insert_tape(tob.ts, market_id, "tob", asdict(tob))
+                        changed += 1
+                    observed += 1
                     yield BookEvent(kind="tob", market_id=market_id, tob=tob)
 
                 self._store.upsert_runtime_status(
                     component="feed.gamma",
                     level="ok",
-                    message=f"gamma polling ok (updated {updated})",
-                    detail=f"poll_secs={self._poll} limit={self._limit}",
+                    message=f"gamma polling ok (observed {observed}, changed {changed})",
+                    detail=f"poll_secs={self._poll} limit={self._limit} want={len(want)}",
                     ts=time.time(),
                 )
             except Exception as e:
