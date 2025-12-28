@@ -175,6 +175,25 @@ async def run_paper_trader(settings: Any, store: SqliteStore) -> None:
         )
     current_market_ids: list[str] = []
 
+    def _feed_market_ids() -> list[str]:
+        """
+        Markets to subscribe the feed to.
+
+        Important: we must keep receiving top-of-book updates for any *held positions*,
+        even if they fall out of the scanner's top-N watchlist. Otherwise marks/PnL can
+        appear "stuck" and inventory unwind logic may not trigger due to missing books.
+        """
+        ids: set[str] = set(str(x) for x in (current_market_ids or []) if str(x).strip())
+        # Include any currently open positions (qty != 0) so marks stay fresh.
+        for mid, pos in (portfolio.positions or {}).items():
+            try:
+                if float(getattr(pos, "qty", 0.0) or 0.0) != 0.0:
+                    ids.add(str(mid))
+            except Exception:
+                # Be defensive: never break the feed loop due to a bad position row.
+                continue
+        return list(ids)
+
     async def scanner_loop() -> None:
         nonlocal current_market_ids
         while True:
@@ -219,7 +238,7 @@ async def run_paper_trader(settings: Any, store: SqliteStore) -> None:
             async for ev in feed.events(state):  # type: ignore[arg-type]
                 await _handle_feed_event(ctx, ev)
         else:
-            async for ev in feed.events(lambda: list(current_market_ids)):  # type: ignore[arg-type]
+            async for ev in feed.events(_feed_market_ids):  # type: ignore[arg-type]
                 await _handle_feed_event(ctx, ev)
 
     async def strategy_loop() -> None:
