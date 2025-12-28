@@ -120,6 +120,7 @@ class Settings:
     # Modes
     trade_mode: str  # paper|live
     run_mode: str  # scanner|paper|backtest
+    execution_mode: str  # paper|shadow (shadow logs orders, no fills)
 
     # Polymarket
     polymarket_host: str
@@ -150,8 +151,16 @@ class Settings:
     mm_min_quote_life_secs: float
     mm_max_orders_per_market: int
 
+    # Paper trading realism
+    paper_fill_model: str  # on_book_cross|trade_through
+    paper_min_rest_secs: float
+
     # Risk
     max_pos_per_market: float
+    max_open_positions: int
+    max_pos_age_secs: float
+    unwind_interval_secs: float
+    unwind_max_markets_per_cycle: int
     max_event_exposure: float
     daily_loss_limit: float
     kill_switch: bool
@@ -209,6 +218,14 @@ class Settings:
         if trade_mode not in {"paper", "live"}:
             raise ValueError("TRADE_MODE must be paper|live")
         run_mode = (_get_env("RUN_MODE", "paper") or "paper").lower()
+
+        execution_mode = (_get_env("EXECUTION_MODE", "paper") or "paper").lower()
+        if execution_mode not in {"paper", "shadow"}:
+            raise ValueError("EXECUTION_MODE must be paper|shadow")
+
+        paper_fill_model = (_get_env("PAPER_FILL_MODEL", "on_book_cross") or "on_book_cross").strip().lower()
+        if paper_fill_model not in {"on_book_cross", "trade_through"}:
+            raise ValueError("PAPER_FILL_MODEL must be on_book_cross|trade_through")
         # Portable default: keep SQLite under the project working directory.
         # Users can override via SQLITE_PATH in their .env.
         default_sqlite_path = os.path.join(".", "data", "polymarket_trader.sqlite")
@@ -235,6 +252,7 @@ class Settings:
         return cls(
             trade_mode=trade_mode,
             run_mode=run_mode,
+            execution_mode=execution_mode,
             polymarket_host=_get_env("POLYMARKET_HOST", "https://clob.polymarket.com") or "",
             polymarket_ws=_get_env("POLYMARKET_WS", "wss://ws-subscriptions-clob.polymarket.com/ws") or "",
             polymarket_chain_id=_get_int("POLYMARKET_CHAIN_ID", 137),
@@ -257,7 +275,13 @@ class Settings:
             mm_inventory_skew=_get_float("MM_INVENTORY_SKEW", 0.5),
             mm_min_quote_life_secs=_get_float("MM_MIN_QUOTE_LIFE_SECS", 2.0),
             mm_max_orders_per_market=_get_int("MM_MAX_ORDERS_PER_MARKET", 2),
+            paper_fill_model=paper_fill_model,
+            paper_min_rest_secs=_get_float("PAPER_MIN_REST_SECS", 0.0),
             max_pos_per_market=_get_float("MAX_POS_PER_MARKET", 200.0),
+            max_open_positions=_get_int("MAX_OPEN_POSITIONS", 0),
+            max_pos_age_secs=_get_float("MAX_POS_AGE_SECS", 0.0),
+            unwind_interval_secs=_get_float("UNWIND_INTERVAL_SECS", 10.0),
+            unwind_max_markets_per_cycle=_get_int("UNWIND_MAX_MARKETS_PER_CYCLE", 2),
             max_event_exposure=_get_float("MAX_EVENT_EXPOSURE", 500.0),
             daily_loss_limit=_get_float("DAILY_LOSS_LIMIT", 200.0),
             kill_switch=_get_bool("KILL_SWITCH", False),

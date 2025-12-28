@@ -10,6 +10,7 @@ from connectors.polymarket.mock_stream import MockPolymarketStream
 from connectors.polymarket.ws_stream import PolymarketClobWebSocketStream
 from execution.base import OrderRequest
 from execution.paper import PaperBroker
+from execution.shadow import ShadowBroker
 from risk.portfolio import Portfolio
 from risk.rules import RiskEngine
 from storage.sqlite import SqliteStore
@@ -63,7 +64,14 @@ async def run_paper_trader(settings: Any, store: SqliteStore) -> None:
     state = SharedState()
     discovery = PolymarketMarketDiscovery()
     odds = MockOddsProvider()
-    broker = PaperBroker(store)
+    if str(getattr(settings, "execution_mode", "paper")) == "shadow":
+        broker = ShadowBroker(store)
+    else:
+        broker = PaperBroker(
+            store,
+            fill_model=str(getattr(settings, "paper_fill_model", "on_book_cross")),
+            min_rest_secs=float(getattr(settings, "paper_min_rest_secs", 0.0)),
+        )
     portfolio = Portfolio()
     risk = RiskEngine(settings)
     log = get_logger(__name__)
@@ -129,7 +137,10 @@ async def run_paper_trader(settings: Any, store: SqliteStore) -> None:
             await asyncio.sleep(1.0)
             await _persist_snapshots(ctx)
 
-    await asyncio.gather(scanner_loop(), feed_loop(), strategy_loop(), snapshot_loop())
+    async def unwind_loop() -> None:
+        await _inventory_unwind_loop(ctx)
+
+    await asyncio.gather(scanner_loop(), feed_loop(), strategy_loop(), snapshot_loop(), unwind_loop())
 
 
 async def run_backtest(settings: Any, store: SqliteStore) -> None:
@@ -138,7 +149,14 @@ async def run_backtest(settings: Any, store: SqliteStore) -> None:
 
     state = SharedState()
     odds = MockOddsProvider(noise=0.0)
-    broker = PaperBroker(store)
+    if str(getattr(settings, "execution_mode", "paper")) == "shadow":
+        broker = ShadowBroker(store)
+    else:
+        broker = PaperBroker(
+            store,
+            fill_model=str(getattr(settings, "paper_fill_model", "on_book_cross")),
+            min_rest_secs=float(getattr(settings, "paper_min_rest_secs", 0.0)),
+        )
     portfolio = Portfolio()
     risk = RiskEngine(settings)
     log = get_logger(__name__)
@@ -185,6 +203,8 @@ async def run_backtest(settings: Any, store: SqliteStore) -> None:
             except Exception:
                 log.exception("strategy.error", strategy=strat.name, market_id=market_id)
 
+        # Optional inventory manager (same logic as live paper runner)
+        await _inventory_unwind_once(ctx)
         await _persist_snapshots(ctx)
 
     log.info("backtest.done")
@@ -224,6 +244,9 @@ async def _handle_feed_event(ctx: StrategyContext, ev: FeedEvent) -> None:
         async with ctx.state.lock:
             ctx.state.last_trade[ev.market_id] = ev.trade
             ctx.state.last_trade_update_ts = time.time()
+        fills = await ctx.broker.on_trade(ev.market_id, ev.trade)
+        if fills:
+            await _apply_fills(ctx, fills)
 
 
 async def _apply_fills(ctx: StrategyContext, fills: list[Fill]) -> None:
@@ -343,4 +366,147 @@ async def _maybe_close_before_end(ctx: StrategyContext, market_id: str) -> None:
     await ctx.broker.place_limit(
         OrderRequest(market_id=market_id, side=side, price=px, size=size, meta={"strategy": "risk_close_before_end"})
     )
+
+
+async def _inventory_unwind_loop(ctx: StrategyContext) -> None:
+    """
+    Background loop to keep the bot from accumulating dozens of unattended positions.
+    - If a position is older than MAX_POS_AGE_SECS -> attempt to flatten it.
+    - If open position count exceeds MAX_OPEN_POSITIONS -> flatten oldest positions until under cap.
+    """
+    max_open = int(getattr(ctx.settings, "max_open_positions", 0) or 0)
+    max_age = float(getattr(ctx.settings, "max_pos_age_secs", 0.0) or 0.0)
+    interval = float(getattr(ctx.settings, "unwind_interval_secs", 10.0) or 10.0)
+    max_per_cycle = int(getattr(ctx.settings, "unwind_max_markets_per_cycle", 2) or 2)
+
+    if max_open <= 0 and max_age <= 0:
+        while True:
+            await asyncio.sleep(3600)
+
+    last_unwind_ts: dict[str, float] = {}
+    while True:
+        try:
+            await _inventory_unwind_once(ctx, last_unwind_ts=last_unwind_ts, max_per_cycle=max_per_cycle)
+        except Exception:
+            _log.exception("risk.inventory_unwind.error")
+        await asyncio.sleep(max(1.0, interval))
+
+
+async def _inventory_unwind_once(
+    ctx: StrategyContext,
+    *,
+    last_unwind_ts: dict[str, float] | None = None,
+    max_per_cycle: int | None = None,
+) -> None:
+    last_unwind_ts = {} if last_unwind_ts is None else last_unwind_ts
+    max_per_cycle = 2 if max_per_cycle is None else int(max_per_cycle)
+
+    max_open = int(getattr(ctx.settings, "max_open_positions", 0) or 0)
+    max_age = float(getattr(ctx.settings, "max_pos_age_secs", 0.0) or 0.0)
+
+    now = time.time()
+    # Snapshot tobs to avoid holding lock across network/IO
+    async with ctx.state.lock:
+        tobs = dict(ctx.state.tob)
+
+    open_positions = [(mid, p) for mid, p in ctx.portfolio.positions.items() if float(getattr(p, "qty", 0.0) or 0.0) != 0.0]
+    open_count = len(open_positions)
+    if open_count == 0:
+        return
+
+    def age_secs(p) -> float:
+        ot = float(getattr(p, "opened_ts", 0.0) or 0.0)
+        return 0.0 if ot <= 0 else max(0.0, now - ot)
+
+    # Candidates: too old, or we are over the cap (oldest first).
+    candidates: list[tuple[str, Any, str]] = []
+    if max_age > 0:
+        for mid, p in open_positions:
+            if age_secs(p) >= max_age:
+                candidates.append((mid, p, "age"))
+
+    if max_open > 0 and open_count > max_open:
+        # Add additional candidates (oldest positions) until we could get back under cap.
+        need = max(0, open_count - max_open)
+        rest = sorted(open_positions, key=lambda r: age_secs(r[1]), reverse=True)
+        for mid, p in rest:
+            if any(x[0] == mid for x in candidates):
+                continue
+            candidates.append((mid, p, "cap"))
+            need -= 1
+            if need <= 0:
+                break
+
+    if not candidates:
+        return
+
+    # Throttle per market to avoid spamming if fills are slow.
+    min_repeat = max(10.0, float(getattr(ctx.settings, "unwind_interval_secs", 10.0) or 10.0))
+    did = 0
+    for market_id, pos, reason in candidates:
+        if did >= max_per_cycle:
+            break
+        prev = float(last_unwind_ts.get(str(market_id), 0.0))
+        if (now - prev) < min_repeat:
+            continue
+
+        tob = tobs.get(market_id)
+        if tob is None or tob.best_bid is None or tob.best_ask is None:
+            continue
+
+        qty = float(getattr(pos, "qty", 0.0) or 0.0)
+        if qty == 0.0:
+            continue
+
+        # Flatten quickly: sell at best_bid (long), buy at best_ask (short).
+        if qty > 0:
+            side = "sell"
+            px = float(tob.best_bid)
+        else:
+            side = "buy"
+            px = float(tob.best_ask)
+        size = abs(qty)
+
+        r = ctx.risk.pre_trade_check(
+            market_id=str(market_id),
+            event_id=str(getattr(pos, "event_id", f"event:{market_id}")),
+            side=side,  # type: ignore[arg-type]
+            price=px,
+            size=size,
+            tob=tob,
+            portfolio=ctx.portfolio,
+        )
+        if not r.ok:
+            continue
+
+        # Cancel any existing quotes/orders in this market to stop re-accumulating.
+        await ctx.broker.cancel_all_market(str(market_id))
+        await ctx.broker.place_limit(
+            OrderRequest(
+                market_id=str(market_id),
+                side=side,  # type: ignore[arg-type]
+                price=px,
+                size=size,
+                meta={
+                    "strategy": "risk_inventory_unwind",
+                    "reason": reason,
+                    "opened_age_secs": age_secs(pos),
+                    "open_count": open_count,
+                    "max_open_positions": max_open,
+                },
+            )
+        )
+        last_unwind_ts[str(market_id)] = now
+        did += 1
+        _log.info(
+            "risk.inventory_unwind.placed",
+            market_id=str(market_id),
+            side=side,
+            price=px,
+            size=size,
+            reason=reason,
+            opened_age_secs=age_secs(pos),
+            open_count=open_count,
+            max_open_positions=max_open,
+        )
 

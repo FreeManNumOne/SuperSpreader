@@ -94,6 +94,21 @@ class RiskEngine:
         # Reduce-only orders are allowed even under kill switch / daily loss limit.
         is_reduce_only = abs(new_qty) < abs(cur_qty) or (cur_qty != 0.0 and new_qty == 0.0)
 
+        # Guardrail: cap number of concurrently open positions (markets).
+        # Only blocks *opening a new market from flat*; does not block adjusting existing
+        # positions, and never blocks reduce-only.
+        max_open = int(getattr(self.settings, "max_open_positions", 0) or 0)
+        if max_open > 0 and (not is_reduce_only) and cur_qty == 0.0 and new_qty != 0.0:
+            open_count = sum(1 for p in portfolio.positions.values() if float(getattr(p, "qty", 0.0) or 0.0) != 0.0)
+            if open_count >= max_open:
+                self._maybe_log_reject(
+                    market_id=market_id,
+                    side=side,
+                    reason="max_open_positions",
+                    fields={"open_count": open_count, "max": max_open, "cur_qty": cur_qty, "new_qty": new_qty},
+                )
+                return RiskCheck(False, "max_open_positions")
+
         if bool(self.settings.kill_switch) and not is_reduce_only:
             self._maybe_log_reject(
                 market_id=market_id,

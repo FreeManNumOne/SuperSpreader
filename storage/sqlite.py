@@ -263,15 +263,34 @@ class SqliteStore:
 
     def fetch_latest_positions(self, limit: int = 100) -> list[dict[str, Any]]:
         with self._lock:
+            # IMPORTANT:
+            # Avoid `GROUP BY market_id` with non-aggregated columns.
+            # SQLite will return arbitrary values for non-aggregated columns, which can
+            # make telemetry lie (e.g. showing a stale non-zero position even if the
+            # latest snapshot is flat).
+            #
+            # We select the latest row per market by max autoincrement `id`.
             cur = self._conn.execute(
                 """
-                SELECT market_id, event_id, position, avg_price, mark_price, unrealized_pnl, realized_pnl, MAX(ts) as ts
-                FROM position_snapshots
-                GROUP BY market_id
-                ORDER BY ts DESC
+                WITH latest AS (
+                  SELECT market_id, MAX(id) AS id_max
+                  FROM position_snapshots
+                  GROUP BY market_id
+                )
+                SELECT ps.market_id,
+                       ps.event_id,
+                       ps.position,
+                       ps.avg_price,
+                       ps.mark_price,
+                       ps.unrealized_pnl,
+                       ps.realized_pnl,
+                       ps.ts
+                FROM position_snapshots ps
+                JOIN latest ON latest.id_max = ps.id
+                ORDER BY ps.ts DESC
                 LIMIT ?
                 """,
-                (limit,),
+                (int(limit),),
             )
             cols = [c[0] for c in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
