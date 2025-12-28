@@ -177,6 +177,30 @@ class SqliteStore:
             )
             self._conn.commit()
 
+    def clear_portfolio_telemetry(self) -> None:
+        """
+        Clear *only* portfolio telemetry from SQLite.
+
+        What it clears:
+        - position_snapshots
+        - pnl_snapshots
+
+        What it keeps:
+        - orders, fills, tape, markets, scanner/watchlist, runtime_status
+
+        Use this when you want a clean "Open positions / PnL" view without wiping
+        execution history.
+        """
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.executescript(
+                """
+                DELETE FROM position_snapshots;
+                DELETE FROM pnl_snapshots;
+                """
+            )
+            self._conn.commit()
+
     def upsert_markets(self, markets: Iterable[dict[str, Any]]) -> None:
         now = time.time()
         with self._lock:
