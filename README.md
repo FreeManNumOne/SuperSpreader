@@ -142,6 +142,13 @@ Two useful knobs for bridging the gap between paper and production microstructur
   - `PAPER_FILL_MODEL=trade_through`
   - Optionally `PAPER_MIN_REST_SECS=1.0` to require orders rest before they can fill.
 
+### Tick size / quoting precision (important for low-price markets)
+
+Polymarket markets frequently trade below 1 cent. To avoid accidentally posting crossing quotes
+or hard-clamping prices too high, set:
+
+- `PRICE_TICK=0.001` (default)
+
 ### Inventory controls (reduce “dozens of open positions” risk)
 
 Two optional guardrails (disabled by default):
