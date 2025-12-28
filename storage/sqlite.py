@@ -141,6 +141,32 @@ class SqliteStore:
             )
             self._conn.commit()
 
+    def clear_trading_state(self) -> None:
+        """
+        Clear paper trading state from SQLite.
+
+        Intended use:
+        - Paper mode "factory reset" when telemetry/positions are stale or you want a clean slate.
+        - Safe to call while the app is running (uses store lock), but will obviously wipe history.
+
+        What it clears:
+        - orders, fills, position_snapshots, pnl_snapshots
+
+        What it keeps:
+        - markets, tape, scanner/watchlist
+        """
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.executescript(
+                """
+                DELETE FROM orders;
+                DELETE FROM fills;
+                DELETE FROM position_snapshots;
+                DELETE FROM pnl_snapshots;
+                """
+            )
+            self._conn.commit()
+
     def upsert_markets(self, markets: Iterable[dict[str, Any]]) -> None:
         now = time.time()
         with self._lock:

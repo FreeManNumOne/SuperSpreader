@@ -154,6 +154,9 @@ class Settings:
     # Paper trading realism
     paper_fill_model: str  # on_book_cross|trade_through
     paper_min_rest_secs: float
+    # Paper state persistence (SQLite-backed telemetry)
+    paper_rehydrate_portfolio: bool
+    paper_reset_on_start: bool
 
     # Risk
     max_pos_per_market: float
@@ -198,6 +201,7 @@ class Settings:
     dashboard_host: str
     dashboard_port: int
     dashboard_open_browser: bool
+    dashboard_enable_reset: bool
 
     # Backtest
     backtest_speed: float
@@ -277,6 +281,8 @@ class Settings:
             mm_max_orders_per_market=_get_int("MM_MAX_ORDERS_PER_MARKET", 2),
             paper_fill_model=paper_fill_model,
             paper_min_rest_secs=_get_float("PAPER_MIN_REST_SECS", 0.0),
+            paper_rehydrate_portfolio=_get_bool("PAPER_REHYDRATE_PORTFOLIO", True),
+            paper_reset_on_start=_get_bool("PAPER_RESET_ON_START", False),
             max_pos_per_market=_get_float("MAX_POS_PER_MARKET", 200.0),
             max_open_positions=_get_int("MAX_OPEN_POSITIONS", 0),
             max_pos_age_secs=_get_float("MAX_POS_AGE_SECS", 0.0),
@@ -309,6 +315,7 @@ class Settings:
             dashboard_host=_get_env("DASHBOARD_HOST", "127.0.0.1") or "127.0.0.1",
             dashboard_port=_get_int("DASHBOARD_PORT", 8000),
             dashboard_open_browser=_get_bool("DASHBOARD_OPEN_BROWSER", True),
+            dashboard_enable_reset=_get_bool("DASHBOARD_ENABLE_RESET", False),
             backtest_speed=_get_float("BACKTEST_SPEED", 50.0),
             backtest_start_ts=_get_env("BACKTEST_START_TS"),
             backtest_end_ts=_get_env("BACKTEST_END_TS"),

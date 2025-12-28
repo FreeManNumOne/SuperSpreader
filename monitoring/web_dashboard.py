@@ -19,6 +19,9 @@ def build_app(settings: Any, store: Any) -> FastAPI:
         mode = getattr(settings, "run_mode", "?")
         trade_mode = getattr(settings, "trade_mode", "?")
         sqlite_path = getattr(settings, "sqlite_path", "?")
+        can_reset = bool(getattr(settings, "trade_mode", "").lower() == "paper") and bool(
+            getattr(settings, "dashboard_enable_reset", False)
+        )
 
         # Single-file UI (no build step, no external CDNs).
         return f"""<!doctype html>
@@ -187,6 +190,7 @@ def build_app(settings: Any, store: Any) -> FastAPI:
           <div class="chip">SQLite: <b class="mono">{sqlite_path}</b></div>
           <div class="chip">Status: <b id="statusText">starting…</b></div>
           <button class="btn" id="refreshBtn">Refresh</button>
+          {"<button class=\"btn\" id=\"resetBtn\" style=\"border-color: rgba(255,77,77,0.45);\">Reset paper state</button>" if can_reset else ""}
         </div>
       </div>
 
@@ -644,6 +648,23 @@ def build_app(settings: Any, store: Any) -> FastAPI:
       }}
 
       document.getElementById("refreshBtn").addEventListener("click", refresh);
+      const resetBtn = document.getElementById("resetBtn");
+      if (resetBtn) {{
+        resetBtn.addEventListener("click", async () => {{
+          const ok = confirm("Reset paper state? This deletes orders/fills/position snapshots/PnL from SQLite.");
+          if (!ok) return;
+          try {{
+            const r = await fetch("/api/admin/reset_paper_state", {{ method: "POST" }});
+            if (!r.ok) {{
+              const t = await r.text();
+              throw new Error(`reset failed: ${{r.status}} ${{t}}`);
+            }}
+            await refresh();
+          }} catch (e) {{
+            showBanner("Reset failed", (e && e.message) ? e.message : String(e));
+          }}
+        }});
+      }}
       tickClock();
       setInterval(tickClock, 1000);
       refresh();
@@ -699,6 +720,18 @@ def build_app(settings: Any, store: Any) -> FastAPI:
     @app.get("/api/publishers", response_class=JSONResponse)
     def publishers() -> dict[str, Any]:
         return get_publisher_statuses()
+
+    @app.post("/api/admin/reset_paper_state", response_class=JSONResponse)
+    def reset_paper_state() -> dict[str, Any]:
+        if str(getattr(settings, "trade_mode", "")).lower() != "paper":
+            return JSONResponse(status_code=400, content={"ok": False, "error": "reset_only_allowed_in_paper_mode"})
+        if not bool(getattr(settings, "dashboard_enable_reset", False)):
+            return JSONResponse(status_code=403, content={"ok": False, "error": "reset_disabled"})
+        try:
+            store.clear_trading_state()
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"ok": False, "error": str(e)[:2000]})
+        return {"ok": True, "ts": time.time()}
 
     return app
 

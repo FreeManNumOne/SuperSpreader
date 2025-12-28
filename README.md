@@ -149,6 +149,21 @@ Two optional guardrails (disabled by default):
   - `UNWIND_INTERVAL_SECS=10`
   - `UNWIND_MAX_MARKETS_PER_CYCLE=2`
 
+### Paper restart behavior (important)
+
+Paper mode persists telemetry to SQLite. On restart, the system rehydrates the in-memory portfolio from the latest SQLite position snapshots (so risk/unwind and the dashboard stay consistent).
+
+- **Rehydrate portfolio from SQLite on restart** (default on):
+  - `PAPER_REHYDRATE_PORTFOLIO=1`
+- **Factory reset paper state on startup** (wipes orders/fills/position snapshots/PnL):
+  - `PAPER_RESET_ON_START=1`
+
+### Dashboard: optional “Reset paper state” button
+
+To enable a one-click reset in the local dashboard (paper mode only):
+
+- `DASHBOARD_ENABLE_RESET=1`
+
 ### Tests
 
 ```bash

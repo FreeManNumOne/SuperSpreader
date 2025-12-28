@@ -12,6 +12,7 @@ from execution.base import OrderRequest
 from execution.paper import PaperBroker
 from execution.shadow import ShadowBroker
 from risk.portfolio import Portfolio
+from risk.portfolio import Position
 from risk.rules import RiskEngine
 from storage.sqlite import SqliteStore
 from strategies.base import StrategyContext
@@ -23,6 +24,66 @@ from trading.types import Fill, MarketInfo, TopOfBook, TradeTick
 from utils.logging import get_logger
 
 _log = get_logger(__name__)
+
+
+def _maybe_init_paper_portfolio_from_store(*, settings: Any, store: SqliteStore, portfolio: Portfolio) -> None:
+    """
+    On restart, the in-memory portfolio starts empty, but the dashboard/risk may show old
+    positions from SQLite snapshots. In paper mode we want the bot to:
+    - continue managing existing paper positions
+    - keep telemetry truthful after restarts
+
+    So we rehydrate positions from the latest per-market snapshot (opt-out via env).
+    """
+    if str(getattr(settings, "trade_mode", "")).lower() != "paper":
+        return
+
+    if bool(getattr(settings, "paper_reset_on_start", False)):
+        store.clear_trading_state()
+        portfolio.positions.clear()
+        _log.warning("paper_state.reset_on_start", sqlite_path=getattr(settings, "sqlite_path", None))
+        return
+
+    if not bool(getattr(settings, "paper_rehydrate_portfolio", True)):
+        return
+
+    rows = store.fetch_latest_positions(limit=5000)
+    if not rows:
+        return
+
+    now = time.time()
+    loaded_open = 0
+    loaded_total = 0
+    for r in rows:
+        mid = str(r.get("market_id") or "").strip()
+        if not mid:
+            continue
+        qty = float(r.get("position") or 0.0)
+        realized = float(r.get("realized_pnl") or 0.0)
+        # Keep open positions and (optionally) realized history carriers.
+        if qty == 0.0 and realized == 0.0:
+            continue
+        p = Position(
+            market_id=mid,
+            event_id=str(r.get("event_id") or f"event:{mid}"),
+            qty=float(qty),
+            avg_price=float(r.get("avg_price") or 0.0),
+            realized_pnl=float(realized),
+            last_mark=float(r.get("mark_price") or 0.0),
+            opened_ts=(now if qty != 0.0 else 0.0),
+        )
+        portfolio.positions[mid] = p
+        loaded_total += 1
+        if qty != 0.0:
+            loaded_open += 1
+
+    if loaded_total:
+        _log.info(
+            "paper_state.rehydrated",
+            loaded_total=loaded_total,
+            loaded_open=loaded_open,
+            sqlite_path=getattr(settings, "sqlite_path", None),
+        )
 
 
 async def run_scanner(settings: Any, store: SqliteStore) -> None:
@@ -73,6 +134,7 @@ async def run_paper_trader(settings: Any, store: SqliteStore) -> None:
             min_rest_secs=float(getattr(settings, "paper_min_rest_secs", 0.0)),
         )
     portfolio = Portfolio()
+    _maybe_init_paper_portfolio_from_store(settings=settings, store=store, portfolio=portfolio)
     risk = RiskEngine(settings)
     log = get_logger(__name__)
 
@@ -158,6 +220,7 @@ async def run_backtest(settings: Any, store: SqliteStore) -> None:
             min_rest_secs=float(getattr(settings, "paper_min_rest_secs", 0.0)),
         )
     portfolio = Portfolio()
+    _maybe_init_paper_portfolio_from_store(settings=settings, store=store, portfolio=portfolio)
     risk = RiskEngine(settings)
     log = get_logger(__name__)
 
