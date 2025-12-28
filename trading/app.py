@@ -6,6 +6,7 @@ from typing import Any
 
 from connectors.external_odds.mock import MockOddsProvider
 from connectors.polymarket.market_discovery import PolymarketMarketDiscovery
+from connectors.polymarket.gamma_poll_stream import PolymarketGammaPollStream
 from connectors.polymarket.mock_stream import MockPolymarketStream
 from connectors.polymarket.ws_stream import PolymarketClobWebSocketStream
 from execution.base import OrderRequest
@@ -141,11 +142,37 @@ async def run_paper_trader(settings: Any, store: SqliteStore) -> None:
     strategies = [CrossVenueFairValueStrategy(), MarketMakingStrategy()]
     ctx = StrategyContext(settings=settings, state=state, store=store, broker=broker, risk=risk, portfolio=portfolio, odds=odds)
 
-    live_ws = bool(getattr(settings, "use_live_ws_feed", False))
-    if live_ws:
+    feed_mode = str(getattr(settings, "polymarket_feed", "") or "").strip().lower()
+    if feed_mode not in {"mock", "gamma", "ws"}:
+        feed_mode = "mock"
+
+    if feed_mode == "ws":
         feed = PolymarketClobWebSocketStream(settings.polymarket_ws, store=store)
+        store.upsert_runtime_status(
+            component="feed",
+            level="warn",
+            message="using websocket feed (can break if Polymarket changes protocol)",
+            detail=f"url={getattr(settings,'polymarket_ws',None)!r}",
+            ts=time.time(),
+        )
+    elif feed_mode == "gamma":
+        feed = PolymarketGammaPollStream(store=store, poll_secs=1.0)
+        store.upsert_runtime_status(
+            component="feed",
+            level="ok",
+            message="using gamma poll feed",
+            detail="source=gamma-api bestBid/bestAsk",
+            ts=time.time(),
+        )
     else:
         feed = MockPolymarketStream(store=store, tick_hz=5.0)
+        store.upsert_runtime_status(
+            component="feed",
+            level="ok",
+            message="using mock feed",
+            detail="source=synthetic",
+            ts=time.time(),
+        )
     current_market_ids: list[str] = []
 
     async def scanner_loop() -> None:
@@ -168,16 +195,31 @@ async def run_paper_trader(settings: Any, store: SqliteStore) -> None:
                     state.ranked_markets = [m.market_id for m in top]
                 current_market_ids = [m.market_id for m in top]
                 log.info("markets.ranked", top=len(top), eligible=len(eligible))
+                store.upsert_runtime_status(
+                    component="scanner",
+                    level="ok",
+                    message=f"scanner ok (eligible={len(eligible)} top={len(top)})",
+                    ts=time.time(),
+                )
             except Exception:
                 log.exception("scanner.error")
+                store.upsert_runtime_status(
+                    component="scanner",
+                    level="error",
+                    message="scanner failed",
+                    detail="see logs for stacktrace",
+                    ts=time.time(),
+                )
             await asyncio.sleep(int(settings.market_refresh_secs))
 
     async def feed_loop() -> None:
-        if live_ws:
-            async for ev in feed.events(lambda: list(current_market_ids)):  # type: ignore[arg-type]
+        # All feed implementations accept a market id provider, except the mock feed which
+        # uses in-memory state (kept for offline mode).
+        if feed_mode == "mock":
+            async for ev in feed.events(state):  # type: ignore[arg-type]
                 await _handle_feed_event(ctx, ev)
         else:
-            async for ev in feed.events(state):  # type: ignore[arg-type]
+            async for ev in feed.events(lambda: list(current_market_ids)):  # type: ignore[arg-type]
                 await _handle_feed_event(ctx, ev)
 
     async def strategy_loop() -> None:

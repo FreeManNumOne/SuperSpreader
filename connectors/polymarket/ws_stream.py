@@ -38,6 +38,13 @@ class PolymarketClobWebSocketStream:
             try:
                 async with websockets.connect(self.ws_url, ping_interval=20, ping_timeout=20) as ws:
                     self._log.info("ws.connected", url=self.ws_url)
+                    self._store.upsert_runtime_status(
+                        component="feed.ws",
+                        level="ok",
+                        message="websocket connected",
+                        detail=f"url={self.ws_url}",
+                        ts=time.time(),
+                    )
                     backoff = 1.0
 
                     subscribed: set[str] = set()
@@ -81,6 +88,14 @@ class PolymarketClobWebSocketStream:
                         yield ev
             except Exception:
                 self._log.exception("ws.error", url=self.ws_url, backoff=backoff)
+                # Keep dashboard concise: record short error + URL.
+                self._store.upsert_runtime_status(
+                    component="feed.ws",
+                    level="error",
+                    message="websocket feed error",
+                    detail=f"url={self.ws_url} backoff={backoff}",
+                    ts=time.time(),
+                )
                 await asyncio.sleep(backoff)
                 backoff = min(30.0, backoff * 2.0)
 
