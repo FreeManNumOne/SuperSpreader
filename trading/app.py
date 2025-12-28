@@ -200,6 +200,29 @@ async def run_paper_trader(settings: Any, store: SqliteStore) -> None:
                 continue
         return list(ids)
 
+    def _feed_ws_subscriptions() -> list[dict[str, str]]:
+        """
+        For websocket MARKET channel subscription, we need CLOB asset ids (token ids).
+        We subscribe to the primary token for each market (usually the "Yes" token) and
+        keep the internal market_id (Gamma numeric id) for the rest of the system.
+        """
+        # Best-effort: avoid awaiting locks inside the feed callback.
+        # A slightly stale mapping is fine; resubscription repeats periodically.
+        want = _feed_market_ids()
+        if not want:
+            return []
+        markets = state.markets
+        out: list[dict[str, str]] = []
+        for mid in want:
+            m = markets.get(str(mid))
+            if m is None:
+                continue
+            asset_id = str(getattr(m, "clob_token_id", None) or "").strip()
+            if not asset_id:
+                continue
+            out.append({"market_id": str(mid), "asset_id": asset_id})
+        return out
+
     async def scanner_loop() -> None:
         nonlocal current_market_ids
         while True:
@@ -238,9 +261,30 @@ async def run_paper_trader(settings: Any, store: SqliteStore) -> None:
             await asyncio.sleep(int(settings.market_refresh_secs))
 
     async def feed_loop() -> None:
-        # All feed implementations accept a market id provider.
-        async for ev in feed.events(_feed_market_ids):  # type: ignore[arg-type]
-            await _handle_feed_event(ctx, ev)
+        # Feed loop must be resilient: if the WS client crashes or the generator raises,
+        # we don't want to take down the entire process (which would also stop GitHub publishing).
+        while True:
+            try:
+                # All feed implementations accept a market id provider.
+                if feed_mode == "ws":
+                    # WS MARKET channel expects asset ids; we provide mapping entries.
+                    async for ev in feed.events(_feed_ws_subscriptions):  # type: ignore[arg-type]
+                        await _handle_feed_event(ctx, ev)
+                else:
+                    async for ev in feed.events(_feed_market_ids):  # type: ignore[arg-type]
+                        await _handle_feed_event(ctx, ev)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("feed.loop.error", feed_mode=feed_mode)
+                store.upsert_runtime_status(
+                    component="feed.loop",
+                    level="error",
+                    message="feed loop crashed (will retry)",
+                    detail=f"mode={feed_mode}",
+                    ts=time.time(),
+                )
+                await asyncio.sleep(1.0)
 
     async def strategy_loop() -> None:
         while True:

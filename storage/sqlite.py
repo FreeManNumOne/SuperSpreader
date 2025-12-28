@@ -64,6 +64,8 @@ class SqliteStore:
                   end_ts REAL,
                   volume_24h_usd REAL,
                   liquidity_usd REAL,
+                  condition_id TEXT,
+                  clob_token_id TEXT,
                   updated_ts REAL
                 );
 
@@ -170,6 +172,17 @@ class SqliteStore:
                 );
                 """
             )
+            # Backwards-compatible migrations for existing DBs.
+            # SQLite doesn't support IF NOT EXISTS for columns, so we inspect and ALTER best-effort.
+            try:
+                cols = {r[1] for r in cur.execute("PRAGMA table_info(markets)").fetchall()}
+                if "condition_id" not in cols:
+                    cur.execute("ALTER TABLE markets ADD COLUMN condition_id TEXT;")
+                if "clob_token_id" not in cols:
+                    cur.execute("ALTER TABLE markets ADD COLUMN clob_token_id TEXT;")
+            except Exception:
+                # Never fail init due to a best-effort migration.
+                pass
             self._conn.commit()
 
     def clear_trading_state(self) -> None:
@@ -227,8 +240,13 @@ class SqliteStore:
         with self._lock:
             self._conn.executemany(
                 """
-                INSERT INTO markets(market_id, question, event_id, active, end_ts, volume_24h_usd, liquidity_usd, updated_ts)
-                VALUES(?,?,?,?,?,?,?,?)
+                INSERT INTO markets(
+                  market_id, question, event_id, active, end_ts,
+                  volume_24h_usd, liquidity_usd,
+                  condition_id, clob_token_id,
+                  updated_ts
+                )
+                VALUES(?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(market_id) DO UPDATE SET
                   question=excluded.question,
                   event_id=excluded.event_id,
@@ -236,6 +254,8 @@ class SqliteStore:
                   end_ts=excluded.end_ts,
                   volume_24h_usd=excluded.volume_24h_usd,
                   liquidity_usd=excluded.liquidity_usd,
+                  condition_id=excluded.condition_id,
+                  clob_token_id=excluded.clob_token_id,
                   updated_ts=excluded.updated_ts
                 """,
                 [
@@ -247,6 +267,8 @@ class SqliteStore:
                         m.get("end_ts"),
                         float(m.get("volume_24h_usd", 0.0)),
                         float(m.get("liquidity_usd", 0.0)),
+                        m.get("condition_id"),
+                        m.get("clob_token_id"),
                         now,
                     )
                     for m in markets

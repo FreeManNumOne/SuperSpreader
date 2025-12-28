@@ -17,6 +17,11 @@ class MarketInfo:
     end_ts: float | None
     volume_24h_usd: float
     liquidity_usd: float
+    # Optional CLOB identifiers used by the websocket market channel.
+    # - condition_id: CLOB condition id (hex string)
+    # - clob_token_id: token/asset id for the *primary* outcome (usually "Yes")
+    condition_id: str | None = None
+    clob_token_id: str | None = None
 
 
 @dataclass(frozen=True)

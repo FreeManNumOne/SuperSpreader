@@ -51,6 +51,38 @@ class PolymarketMarketDiscovery:
             question = str(m.get("question") or m.get("title") or "")
             active = bool(m.get("active", True))
 
+            # CLOB identifiers for websocket market channel.
+            condition_id = None
+            try:
+                condition_id = m.get("conditionId") or m.get("condition_id") or m.get("condition")
+                condition_id = str(condition_id) if condition_id is not None else None
+            except Exception:
+                condition_id = None
+
+            clob_token_id = None
+            try:
+                tok_ids = m.get("clobTokenIds") or m.get("clob_token_ids") or []
+                outcomes = m.get("outcomes") or []
+                if isinstance(tok_ids, str):
+                    # Some APIs return JSON-stringified list.
+                    tok_ids = [x.strip() for x in tok_ids.strip("[]").split(",") if x.strip()]
+                if isinstance(outcomes, str):
+                    outcomes = [x.strip() for x in outcomes.strip("[]").split(",") if x.strip()]
+                if isinstance(tok_ids, list) and tok_ids:
+                    # Prefer the "Yes" token if we can find it.
+                    idx = 0
+                    if isinstance(outcomes, list) and outcomes:
+                        for i, o in enumerate(outcomes):
+                            if str(o or "").strip().lower() == "yes":
+                                idx = i
+                                break
+                    if 0 <= idx < len(tok_ids):
+                        clob_token_id = str(tok_ids[idx])
+                    else:
+                        clob_token_id = str(tok_ids[0])
+            except Exception:
+                clob_token_id = None
+
             # event_id is used for exposure grouping
             event_id = str(m.get("event_id") or "")
             if not event_id:
@@ -104,6 +136,8 @@ class PolymarketMarketDiscovery:
                     end_ts=end_ts,
                     volume_24h_usd=volume_24h_usd,
                     liquidity_usd=liquidity_usd,
+                    condition_id=condition_id,
+                    clob_token_id=clob_token_id,
                 )
             )
 
