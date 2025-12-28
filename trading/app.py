@@ -5,6 +5,7 @@ import time
 from typing import Any
 
 from connectors.external_odds.mock import MockOddsProvider
+from connectors.external_odds.disabled import DisabledOddsProvider
 from connectors.polymarket.market_discovery import PolymarketMarketDiscovery
 from connectors.polymarket.gamma_poll_stream import PolymarketGammaPollStream
 from connectors.polymarket.mock_stream import MockPolymarketStream
@@ -125,7 +126,7 @@ async def run_paper_trader(settings: Any, store: SqliteStore) -> None:
 
     state = SharedState()
     discovery = PolymarketMarketDiscovery()
-    odds = MockOddsProvider()
+    odds = DisabledOddsProvider() if bool(getattr(settings, "disallow_mock_data", False)) else MockOddsProvider()
     if str(getattr(settings, "execution_mode", "paper")) == "shadow":
         broker = ShadowBroker(store)
     else:
@@ -148,6 +149,8 @@ async def run_paper_trader(settings: Any, store: SqliteStore) -> None:
     feed_mode = str(getattr(settings, "polymarket_feed", "") or "").strip().lower()
     if feed_mode not in {"mock", "gamma", "ws"}:
         feed_mode = "mock"
+    if bool(getattr(settings, "disallow_mock_data", False)) and feed_mode == "mock":
+        raise RuntimeError("DISALLOW_MOCK_DATA=true but polymarket_feed is 'mock' (set POLYMARKET_FEED=gamma|ws)")
 
     if feed_mode == "ws":
         feed = PolymarketClobWebSocketStream(settings.polymarket_ws, store=store)
@@ -235,14 +238,9 @@ async def run_paper_trader(settings: Any, store: SqliteStore) -> None:
             await asyncio.sleep(int(settings.market_refresh_secs))
 
     async def feed_loop() -> None:
-        # All feed implementations accept a market id provider, except the mock feed which
-        # uses in-memory state (kept for offline mode).
-        if feed_mode == "mock":
-            async for ev in feed.events(state):  # type: ignore[arg-type]
-                await _handle_feed_event(ctx, ev)
-        else:
-            async for ev in feed.events(_feed_market_ids):  # type: ignore[arg-type]
-                await _handle_feed_event(ctx, ev)
+        # All feed implementations accept a market id provider.
+        async for ev in feed.events(_feed_market_ids):  # type: ignore[arg-type]
+            await _handle_feed_event(ctx, ev)
 
     async def strategy_loop() -> None:
         while True:
@@ -274,6 +272,8 @@ async def run_backtest(settings: Any, store: SqliteStore) -> None:
         raise RuntimeError("Backtest requires TRADE_MODE=paper")
 
     state = SharedState()
+    if bool(getattr(settings, "disallow_mock_data", False)):
+        raise RuntimeError("DISALLOW_MOCK_DATA=true is incompatible with backtest mode (uses mock odds/feed data)")
     odds = MockOddsProvider(noise=0.0)
     if str(getattr(settings, "execution_mode", "paper")) == "shadow":
         broker = ShadowBroker(store)
