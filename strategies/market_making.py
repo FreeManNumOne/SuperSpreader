@@ -35,7 +35,10 @@ class MarketMakingStrategy(Strategy):
         # So: only trust external fair when it is *not* the mock provider.
         ext = await ctx.odds.get_fair_prob(m)
         ext_fair = prob_to_price(ext.fair_prob)
-        fair = mid if str(getattr(ext, "source", "")).lower() == "mock" else ext_fair
+        ext_source = str(getattr(ext, "source", "")).lower()
+        use_mid = ext_source == "mock"
+        fair = mid if use_mid else ext_fair
+        fair_source = "book_mid" if use_mid else (getattr(ext, "source", None) or "external")
 
         # Inventory skew: shift quotes away from current inventory direction
         pos = ctx.portfolio.positions.get(market_id)
@@ -74,7 +77,7 @@ class MarketMakingStrategy(Strategy):
             qm=qm,
             now=now,
             min_life=min_life,
-            meta={"strategy": self.name, "fair": fair, "mid": mid, "source": ext.source},
+            meta={"strategy": self.name, "fair": fair, "mid": mid, "source": fair_source, "external_source": getattr(ext, "source", None)},
         )
         await self._ensure_quote(
             ctx=ctx,
@@ -88,7 +91,7 @@ class MarketMakingStrategy(Strategy):
             qm=qm,
             now=now,
             min_life=min_life,
-            meta={"strategy": self.name, "fair": fair, "mid": mid, "source": ext.source},
+            meta={"strategy": self.name, "fair": fair, "mid": mid, "source": fair_source, "external_source": getattr(ext, "source", None)},
         )
 
     async def _ensure_quote(

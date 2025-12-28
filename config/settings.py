@@ -209,6 +209,9 @@ class Settings:
     backtest_start_ts: str | None
     backtest_end_ts: str | None
 
+    # Strategy toggles
+    enable_cross_venue: bool
+
     _overrides: dict[str, str] | None = None
 
     @staticmethod
@@ -327,6 +330,7 @@ class Settings:
             backtest_speed=_get_float("BACKTEST_SPEED", 50.0),
             backtest_start_ts=_get_env("BACKTEST_START_TS"),
             backtest_end_ts=_get_env("BACKTEST_END_TS"),
+            enable_cross_venue=_get_bool("ENABLE_CROSS_VENUE", False),
         )
 
     def as_dict(self) -> dict[str, Any]:

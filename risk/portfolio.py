@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass, field
 
 from trading.types import Fill, TopOfBook
+from utils.pricing import bps_to_decimal
 
 
 @dataclass
@@ -33,12 +34,13 @@ class Portfolio:
             self.positions[market_id] = p
         return p
 
-    def apply_fill(self, fill: Fill, event_id: str) -> None:
+    def apply_fill(self, fill: Fill, event_id: str, *, fee_bps: float = 0.0) -> None:
         """
         Simple PnL model:
         - buy increases qty; sell decreases qty
         - avg_price is maintained for net position
         - realized PnL is booked when reducing an existing position
+        - fees are applied as realized costs per fill (optional)
         """
         p = self.get_or_create(fill.market_id, event_id)
         # Keep event_id fresh in case markets were discovered late.
@@ -47,6 +49,15 @@ class Portfolio:
         old_qty = float(p.qty)
         new_qty = p.qty + signed_qty
         now = float(fill.ts) if getattr(fill, "ts", None) is not None else time.time()
+
+        # Trading fee model (very simplified): apply a fee proportional to traded notional.
+        # This keeps paper PnL from being wildly optimistic in spread-capture strategies.
+        try:
+            fee = abs(float(fill.price) * float(fill.size)) * float(bps_to_decimal(float(fee_bps or 0.0)))
+        except Exception:
+            fee = 0.0
+        if fee:
+            p.realized_pnl -= fee
 
         # If same direction or opening from flat: update weighted avg
         if p.qty == 0 or (p.qty > 0 and signed_qty > 0) or (p.qty < 0 and signed_qty < 0):

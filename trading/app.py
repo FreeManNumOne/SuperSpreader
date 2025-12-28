@@ -139,7 +139,10 @@ async def run_paper_trader(settings: Any, store: SqliteStore) -> None:
     risk = RiskEngine(settings)
     log = get_logger(__name__)
 
-    strategies = [CrossVenueFairValueStrategy(), MarketMakingStrategy()]
+    # Default to microstructure spread-capture market making in paper mode.
+    # Cross-venue FV needs a *real* external odds model; the repo default is a mock.
+    enable_cross_venue = bool(getattr(settings, "enable_cross_venue", False))
+    strategies = [MarketMakingStrategy()] + ([CrossVenueFairValueStrategy()] if enable_cross_venue else [])
     ctx = StrategyContext(settings=settings, state=state, store=store, broker=broker, risk=risk, portfolio=portfolio, odds=odds)
 
     feed_mode = str(getattr(settings, "polymarket_feed", "") or "").strip().lower()
@@ -285,7 +288,8 @@ async def run_backtest(settings: Any, store: SqliteStore) -> None:
     risk = RiskEngine(settings)
     log = get_logger(__name__)
 
-    strategies = [CrossVenueFairValueStrategy(), MarketMakingStrategy()]
+    enable_cross_venue = bool(getattr(settings, "enable_cross_venue", False))
+    strategies = [MarketMakingStrategy()] + ([CrossVenueFairValueStrategy()] if enable_cross_venue else [])
     ctx = StrategyContext(settings=settings, state=state, store=store, broker=broker, risk=risk, portfolio=portfolio, odds=odds)
 
     # Rebuild markets snapshot from the DB is out-of-scope; we trade whatever appears in tape.
@@ -383,7 +387,8 @@ async def _apply_fills(ctx: StrategyContext, fills: list[Fill]) -> None:
             avg0 = 0.0 if p0 is None else float(p0.avg_price)
             r0 = 0.0 if p0 is None else float(p0.realized_pnl)
 
-            ctx.portfolio.apply_fill(f, event_id=event_id)
+            # Apply basic fees into paper PnL (keeps results from being wildly optimistic).
+            ctx.portfolio.apply_fill(f, event_id=event_id, fee_bps=float(getattr(ctx.settings, "fees_bps", 0.0) or 0.0))
 
             p1 = ctx.portfolio.positions.get(f.market_id)
             qty1 = 0.0 if p1 is None else float(p1.qty)

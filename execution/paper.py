@@ -92,10 +92,16 @@ class PaperBroker(Broker):
                 if self._min_rest_secs > 0 and (time.time() - float(o.created_ts)) < self._min_rest_secs:
                     continue
                 fill_price = None
+                # More conservative than "fill at the new TOB":
+                # - If you cross immediately (aggressive), you pay the touch (ask for buy, bid for sell).
+                # - If you were resting and the book later crosses through your price, assume you fill at
+                #   your limit (no free price improvement).
                 if o.side == "buy" and tob.best_ask is not None and o.price >= tob.best_ask:
-                    fill_price = tob.best_ask
+                    crossed_on_entry = float(o.price) > float(tob.best_ask)
+                    fill_price = float(tob.best_ask) if crossed_on_entry else float(o.price)
                 if o.side == "sell" and tob.best_bid is not None and o.price <= tob.best_bid:
-                    fill_price = tob.best_bid
+                    crossed_on_entry = float(o.price) < float(tob.best_bid)
+                    fill_price = float(tob.best_bid) if crossed_on_entry else float(o.price)
                 if fill_price is None:
                     continue
 
