@@ -37,7 +37,11 @@ def test_max_position_blocks():
     tob = TopOfBook(best_bid=0.49, best_bid_size=10, best_ask=0.51, best_ask_size=10)
     pf = Portfolio()
     # Create existing long position of 10
-    pf.apply_fill(Fill(fill_id="f1", order_id="o1", market_id="m1", side="buy", price=0.5, size=10, ts=0), event_id="e1")
+    pf.apply_fill(
+        Fill(fill_id="f1", order_id="o1", market_id="m1", side="buy", price=0.5, size=10, ts=0),
+        event_id="e1",
+        fee_bps=0.0,
+    )
     out = r.pre_trade_check(
         market_id="m1", event_id="e1", side="buy", price=0.5, size=1, tob=tob, portfolio=pf
     )

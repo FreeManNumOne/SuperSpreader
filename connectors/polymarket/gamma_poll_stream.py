@@ -8,8 +8,8 @@ from typing import Any, AsyncIterator
 import aiohttp
 
 from storage.sqlite import SqliteStore
-from trading.feed import BookEvent, FeedEvent
-from trading.types import TopOfBook
+from trading.feed import BookEvent, FeedEvent, TradeEvent
+from trading.types import TopOfBook, TradeTick
 from utils.logging import get_logger
 
 
@@ -43,6 +43,8 @@ class PolymarketGammaPollStream:
         # unchanged for long stretches. We still need to "refresh" observation time so risk
         # circuit breakers don't trip purely due to lack of price movement.
         self._last: dict[str, tuple[float | None, float | None]] = {}
+        # Track last observed trade price so we can emit TradeEvent best-effort.
+        self._last_trade_px: dict[str, float | None] = {}
 
     async def events(self, market_ids_provider) -> AsyncIterator[FeedEvent]:
         timeout = aiohttp.ClientTimeout(total=20)
@@ -85,6 +87,7 @@ class PolymarketGammaPollStream:
 
                     best_bid = _to_float(m.get("bestBid") or m.get("best_bid"))
                     best_ask = _to_float(m.get("bestAsk") or m.get("best_ask"))
+                    last_trade_px = _to_float(m.get("lastTradePrice") or m.get("last_trade_price"))
 
                     prev = self._last.get(market_id)
                     cur = (best_bid, best_ask)
@@ -104,6 +107,34 @@ class PolymarketGammaPollStream:
                         changed += 1
                     observed += 1
                     yield BookEvent(kind="tob", market_id=market_id, tob=tob)
+
+                    # Best-effort trade prints: Gamma exposes lastTradePrice but not a full tape.
+                    # We emit a TradeEvent only when it changes, with a heuristic side.
+                    prev_trade = self._last_trade_px.get(market_id)
+                    self._last_trade_px[market_id] = last_trade_px
+                    if last_trade_px is not None and last_trade_px != prev_trade:
+                        # Heuristic side inference: if it hits the ask => buy; hits the bid => sell; else compare to mid.
+                        side = "buy"
+                        try:
+                            if best_ask is not None and abs(float(last_trade_px) - float(best_ask)) < 1e-9:
+                                side = "buy"
+                            elif best_bid is not None and abs(float(last_trade_px) - float(best_bid)) < 1e-9:
+                                side = "sell"
+                            elif best_bid is not None and best_ask is not None:
+                                mid = 0.5 * (float(best_bid) + float(best_ask))
+                                side = "buy" if float(last_trade_px) >= mid else "sell"
+                        except Exception:
+                            side = "buy"
+
+                        trade = TradeTick(
+                            market_id=market_id,
+                            price=float(last_trade_px),
+                            size=1.0,
+                            side=side,  # type: ignore[assignment]
+                            ts=now,
+                        )
+                        self._store.insert_tape(trade.ts, market_id, "trade", asdict(trade))
+                        yield TradeEvent(kind="trade", market_id=market_id, trade=trade)
 
                 self._store.upsert_runtime_status(
                     component="feed.gamma",

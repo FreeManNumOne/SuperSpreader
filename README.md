@@ -128,6 +128,11 @@ Both options share common controls:
 
 Two useful knobs for bridging the gap between paper and production microstructure:
 
+- **Strategy selection (recommended for meaningful paper PnL)**:
+  - By default, paper mode runs **microstructure market making** only.
+  - Cross-venue FV needs a real external odds model; enable it explicitly:
+    - `ENABLE_CROSS_VENUE=1`
+
 - **Shadow execution** (log “would place/cancel”, never fill):
   - `EXECUTION_MODE=shadow`
   - Combine with `USE_LIVE_WS_FEED=1` to validate signal rate and order churn on real markets.
