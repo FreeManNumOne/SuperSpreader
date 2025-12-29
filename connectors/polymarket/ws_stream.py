@@ -24,6 +24,15 @@ class PolymarketClobWebSocketStream:
     """
 
     def __init__(self, ws_url: str, store: SqliteStore):
+        # The Polymarket website uses the "subscriptions clob" endpoint:
+        #   wss://ws-subscriptions-clob.polymarket.com/ws/market
+        #
+        # Older endpoints like wss://ws-live-data.polymarket.com are less reliable and use a
+        # different schema; in practice they can connect and then get dropped frequently.
+        # To keep the bot usable out-of-the-box, we auto-upgrade that URL.
+        ws_url = (ws_url or "").strip()
+        if "ws-live-data.polymarket.com" in ws_url:
+            ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
         self.ws_url = ws_url
         self._store = store
         self._log = get_logger(__name__)
@@ -87,6 +96,9 @@ class PolymarketClobWebSocketStream:
                     # Track subscribed asset ids (MARKET channel).
                     subscribed_assets: set[str] = set()
                     asset_to_market_id: dict[str, str] = {}
+                    rx_msgs = 0
+                    rx_events = 0
+                    last_rx_log_ts = 0.0
 
                     def _want_assets() -> set[str]:
                         want = market_ids_provider() or []
@@ -141,8 +153,27 @@ class PolymarketClobWebSocketStream:
                                 msg = json.loads(raw)
                             except Exception:
                                 continue
+                            rx_msgs += 1
+                            evs = list(_normalize_ws_payload(msg, asset_to_market_id=asset_to_market_id))
+                            rx_events += len(evs)
+                            now = time.time()
+                            if (now - last_rx_log_ts) >= 30.0:
+                                last_rx_log_ts = now
+                                self._log.info(
+                                    "ws.rx",
+                                    msgs=rx_msgs,
+                                    events=rx_events,
+                                    assets=len(subscribed_assets),
+                                )
+                                self._store.upsert_runtime_status(
+                                    component="feed.ws.rx",
+                                    level="ok",
+                                    message="websocket receiving",
+                                    detail=f"msgs={rx_msgs} events={rx_events} assets={len(subscribed_assets)}",
+                                    ts=now,
+                                )
 
-                            for ev in _normalize_ws_payload(msg, asset_to_market_id=asset_to_market_id):
+                            for ev in evs:
                                 # Persist tape for backtests
                                 if isinstance(ev, BookEvent):
                                     self._store.insert_tape(ev.tob.ts, ev.market_id, "tob", asdict(ev.tob))
@@ -177,21 +208,49 @@ def _normalize_ws_payload(msg: Any, *, asset_to_market_id: dict[str, str] | None
     """
     asset_to_market_id = {} if asset_to_market_id is None else asset_to_market_id
     if isinstance(msg, dict):
-        ev = _normalize_ws_message(msg, asset_to_market_id=asset_to_market_id)
-        return [] if ev is None else [ev]
+        # The /ws/market endpoint sends batched updates like:
+        #   {"market":"0x..","price_changes":[{...},{...}]}
+        if isinstance(msg.get("price_changes"), list):
+            out: list[FeedEvent] = []
+            for row in msg.get("price_changes") or []:
+                if not isinstance(row, dict):
+                    continue
+                # Carry the market wrapper field down for context if needed.
+                row2 = dict(row)
+                if "market" not in row2 and isinstance(msg.get("market"), str):
+                    row2["market"] = msg["market"]
+                evs = _normalize_ws_message(row2, asset_to_market_id=asset_to_market_id)
+                if evs is None:
+                    continue
+                if isinstance(evs, list):
+                    out.extend(evs)
+                else:
+                    out.append(evs)
+            return out
+
+        evs = _normalize_ws_message(msg, asset_to_market_id=asset_to_market_id)
+        if evs is None:
+            return []
+        return evs if isinstance(evs, list) else [evs]
     if isinstance(msg, list):
         out: list[FeedEvent] = []
         for row in msg:
             if not isinstance(row, dict):
                 continue
-            ev = _normalize_ws_message(row, asset_to_market_id=asset_to_market_id)
-            if ev is not None:
-                out.append(ev)
+            evs = _normalize_ws_message(row, asset_to_market_id=asset_to_market_id)
+            if evs is None:
+                continue
+            if isinstance(evs, list):
+                out.extend(evs)
+            else:
+                out.append(evs)
         return out
     return []
 
 
-def _normalize_ws_message(msg: dict[str, Any], *, asset_to_market_id: dict[str, str] | None = None) -> FeedEvent | None:
+def _normalize_ws_message(
+    msg: dict[str, Any], *, asset_to_market_id: dict[str, str] | None = None
+) -> FeedEvent | list[FeedEvent] | None:
     """
     Best-effort normalization: tries common field patterns for book/trade updates.
     You should adapt this once you inspect Polymarket's current ws payloads.
@@ -229,6 +288,66 @@ def _normalize_ws_message(msg: dict[str, Any], *, asset_to_market_id: dict[str, 
                 )
                 if market_id_direct:
                     return BookEvent(kind="tob", market_id=market_id_direct, tob=tob)
+            except Exception:
+                return None
+
+    # /ws/market snapshot payloads: {market:"0x..", asset_id:"..", bids:[{price,size}], asks:[{price,size}]}
+    # Compute best bid/ask from arrays.
+    if isinstance(data.get("bids"), list) or isinstance(data.get("asks"), list):
+        asset_id = data.get("asset_id") or data.get("assetId") or data.get("asset") or None
+        if asset_id is not None:
+            asset_id = str(asset_id)
+        mapped_market_id = asset_to_market_id.get(str(asset_id)) if asset_id else None
+        market_id = str(mapped_market_id or market_id_direct or "")
+        if market_id:
+            try:
+                bids = data.get("bids") or []
+                asks = data.get("asks") or []
+                best_bid = None
+                best_bid_sz = None
+                best_ask = None
+                best_ask_sz = None
+
+                def _lvl_to_px_sz(lvl) -> tuple[float | None, float | None]:
+                    if not isinstance(lvl, dict):
+                        return None, None
+                    px = lvl.get("price")
+                    sz = lvl.get("size")
+                    try:
+                        px_f = float(px) if px is not None else None
+                    except Exception:
+                        px_f = None
+                    try:
+                        sz_f = float(sz) if sz is not None else None
+                    except Exception:
+                        sz_f = None
+                    return px_f, sz_f
+
+                if isinstance(bids, list) and bids:
+                    for lvl in bids:
+                        px, sz = _lvl_to_px_sz(lvl)
+                        if px is None:
+                            continue
+                        if best_bid is None or px > best_bid:
+                            best_bid = px
+                            best_bid_sz = sz
+                if isinstance(asks, list) and asks:
+                    for lvl in asks:
+                        px, sz = _lvl_to_px_sz(lvl)
+                        if px is None:
+                            continue
+                        if best_ask is None or px < best_ask:
+                            best_ask = px
+                            best_ask_sz = sz
+
+                tob = TopOfBook(
+                    best_bid=best_bid,
+                    best_bid_size=best_bid_sz,
+                    best_ask=best_ask,
+                    best_ask_size=best_ask_sz,
+                    ts=observed_ts,
+                )
+                return BookEvent(kind="tob", market_id=market_id, tob=tob)
             except Exception:
                 return None
 
@@ -292,6 +411,45 @@ def _normalize_ws_message(msg: dict[str, Any], *, asset_to_market_id: dict[str, 
         except Exception:
             return None
 
+    # /ws/market incremental updates are delivered as "price_changes" wrapper; each row includes
+    # best_bid/best_ask and sometimes non-zero (price,size,side) which can be treated as a trade tick.
+    # When we are here, `data` is already the row itself.
+    if ("best_bid" in data or "best_ask" in data) and (asset_id or market_id_direct):
+        mapped_market_id = asset_to_market_id.get(str(asset_id)) if asset_id else None
+        mid = str(mapped_market_id or market_id_direct or "")
+        if mid:
+            out: list[FeedEvent] = []
+            try:
+                tob = TopOfBook(
+                    best_bid=float(data["best_bid"]) if data.get("best_bid") is not None else None,
+                    best_bid_size=None,
+                    best_ask=float(data["best_ask"]) if data.get("best_ask") is not None else None,
+                    best_ask_size=None,
+                    ts=observed_ts,
+                )
+                out.append(BookEvent(kind="tob", market_id=mid, tob=tob))
+            except Exception:
+                pass
+
+            # If a non-zero size is present, emit a TradeEvent too.
+            try:
+                sz = data.get("size")
+                px = data.get("price")
+                side = str(data.get("side") or "").lower()
+                if sz is not None and px is not None and side in {"buy", "sell"} and float(sz) > 0.0:
+                    trade = TradeTick(
+                        market_id=mid,
+                        price=float(px),
+                        size=float(sz),
+                        side=side,  # type: ignore[assignment]
+                        ts=observed_ts,
+                    )
+                    out.append(TradeEvent(kind="trade", market_id=mid, trade=trade))
+            except Exception:
+                pass
+
+            return out or None
+
     # Trade style
     # Trade messages: either direct market_id or mapped from asset_id.
     trade_market_id = str(market_id_direct) if market_id_direct else (str(market_id) if market_id else None)
@@ -316,7 +474,7 @@ def _normalize_ws_message(msg: dict[str, Any], *, asset_to_market_id: dict[str, 
             )
             if trade.side not in ("buy", "sell"):
                 return None
-            return TradeEvent(kind="trade", market_id=market_id, trade=trade)
+            return TradeEvent(kind="trade", market_id=str(trade_market_id), trade=trade)
         except Exception:
             return None
 
