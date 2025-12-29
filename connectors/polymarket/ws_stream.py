@@ -4,7 +4,7 @@ import asyncio
 import json
 import time
 from dataclasses import asdict
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Iterable
 
 import websockets
 
@@ -44,8 +44,9 @@ class PolymarketClobWebSocketStream:
             try:
                 async with websockets.connect(
                     self.ws_url,
-                    ping_interval=20,
-                    ping_timeout=20,
+                    # We run our own keepalive loop to be explicit/portable across WS servers.
+                    ping_interval=None,
+                    ping_timeout=None,
                     open_timeout=10,
                     close_timeout=5,
                 ) as ws:
@@ -58,6 +59,30 @@ class PolymarketClobWebSocketStream:
                         ts=time.time(),
                     )
                     backoff = 1.0
+
+                    async def _ping_loop() -> None:
+                        # Send websocket *control-frame* pings (not JSON "ping" ops).
+                        # Some Polymarket WS endpoints reject JSON ping messages (e.g. "INVALID OPERATION").
+                        ping_interval_s = 20.0
+                        ping_timeout_s = 20.0
+                        while True:
+                            await asyncio.sleep(ping_interval_s)
+                            if ws.closed:
+                                return
+                            try:
+                                pong_waiter = ws.ping()
+                                await asyncio.wait_for(pong_waiter, timeout=ping_timeout_s)
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception:
+                                # Force reconnect by closing the socket.
+                                try:
+                                    await ws.close()
+                                except Exception:
+                                    pass
+                                return
+
+                    keepalive_task = asyncio.create_task(_ping_loop())
 
                     # Track subscribed asset ids (MARKET channel).
                     subscribed_assets: set[str] = set()
@@ -89,39 +114,47 @@ class PolymarketClobWebSocketStream:
                         new_assets = want_assets - subscribed_assets
                         if not new_assets:
                             return
-                        # Polymarket docs: initial subscription message includes `type` and `assets_ids`.
-                        # MARKET channel is public (no auth required).
-                        msg = {"type": "MARKET", "assets_ids": list(new_assets)}
+                        # Polymarket RTDS-style subscription on:
+                        #   wss://ws-subscriptions-clob.polymarket.com/ws/market
+                        # (the public market/book topic used by the web app)
+                        #
+                        # The accepted shape is:
+                        #   {"action":"subscribe","type":"MARKET","assets_ids":[...]}
+                        # where `assets_ids` are CLOB token IDs.
+                        msg = {"action": "subscribe", "type": "MARKET", "assets_ids": list(new_assets)}
                         await ws.send(json.dumps(msg))
                         subscribed_assets |= new_assets
                         self._log.info("ws.subscribed", assets=len(subscribed_assets))
 
                     await resub()
 
-                    while True:
+                    try:
+                        while True:
+                            try:
+                                await resub()
+                                raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                            except asyncio.TimeoutError:
+                                continue
+                            if not raw:
+                                continue
+                            try:
+                                msg = json.loads(raw)
+                            except Exception:
+                                continue
+
+                            for ev in _normalize_ws_payload(msg, asset_to_market_id=asset_to_market_id):
+                                # Persist tape for backtests
+                                if isinstance(ev, BookEvent):
+                                    self._store.insert_tape(ev.tob.ts, ev.market_id, "tob", asdict(ev.tob))
+                                elif isinstance(ev, TradeEvent):
+                                    self._store.insert_tape(ev.trade.ts, ev.market_id, "trade", asdict(ev.trade))
+                                yield ev
+                    finally:
+                        keepalive_task.cancel()
                         try:
-                            await resub()
-                            raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
-                        except asyncio.TimeoutError:
-                            continue
-                        if not raw:
-                            continue
-                        try:
-                            msg = json.loads(raw)
+                            await keepalive_task
                         except Exception:
-                            continue
-
-                        ev = _normalize_ws_message(msg, asset_to_market_id=asset_to_market_id)
-                        if ev is None:
-                            continue
-
-                        # Persist tape for backtests
-                        if isinstance(ev, BookEvent):
-                            self._store.insert_tape(ev.tob.ts, ev.market_id, "tob", asdict(ev.tob))
-                        elif isinstance(ev, TradeEvent):
-                            self._store.insert_tape(ev.trade.ts, ev.market_id, "trade", asdict(ev.trade))
-
-                        yield ev
+                            pass
             except Exception as e:
                 self._log.exception("ws.error", url=self.ws_url, backoff=backoff)
                 # Keep dashboard concise: record short error + URL.
@@ -134,6 +167,28 @@ class PolymarketClobWebSocketStream:
                 )
                 await asyncio.sleep(backoff)
                 backoff = min(30.0, backoff * 2.0)
+
+
+def _normalize_ws_payload(msg: Any, *, asset_to_market_id: dict[str, str] | None = None) -> Iterable[FeedEvent]:
+    """
+    Polymarket WS endpoints may emit either:
+    - a single JSON object (dict), or
+    - a JSON array of objects (list[dict]) (e.g. book snapshots).
+    """
+    asset_to_market_id = {} if asset_to_market_id is None else asset_to_market_id
+    if isinstance(msg, dict):
+        ev = _normalize_ws_message(msg, asset_to_market_id=asset_to_market_id)
+        return [] if ev is None else [ev]
+    if isinstance(msg, list):
+        out: list[FeedEvent] = []
+        for row in msg:
+            if not isinstance(row, dict):
+                continue
+            ev = _normalize_ws_message(row, asset_to_market_id=asset_to_market_id)
+            if ev is not None:
+                out.append(ev)
+        return out
+    return []
 
 
 def _normalize_ws_message(msg: dict[str, Any], *, asset_to_market_id: dict[str, str] | None = None) -> FeedEvent | None:

@@ -278,9 +278,10 @@ class Settings:
             disallow_mock_data=disallow_mock_data,
             polymarket_host=_get_env("POLYMARKET_HOST", "https://clob.polymarket.com") or "",
             # Polymarket has historically changed websocket endpoints.
-            # Current public endpoint used by the website:
-            #   wss://ws-live-data.polymarket.com
-            polymarket_ws=_get_env("POLYMARKET_WS", "wss://ws-live-data.polymarket.com") or "",
+            # Current public market/book feed endpoint used by the website:
+            #   wss://ws-subscriptions-clob.polymarket.com/ws/market
+            # (Older endpoints like wss://ws-live-data.polymarket.com are less reliable and use a different protocol.)
+            polymarket_ws=_get_env("POLYMARKET_WS", "wss://ws-subscriptions-clob.polymarket.com/ws/market") or "",
             polymarket_feed=polymarket_feed,
             polymarket_chain_id=_get_int("POLYMARKET_CHAIN_ID", 137),
             polymarket_private_key=_get_env("POLYMARKET_PRIVATE_KEY"),
