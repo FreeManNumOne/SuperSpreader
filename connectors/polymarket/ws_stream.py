@@ -102,6 +102,10 @@ class PolymarketClobWebSocketStream:
                     rx_msgs = 0
                     rx_events = 0
                     last_rx_log_ts = 0.0
+                    # Debug helpers: make sure protocol/schema issues are visible.
+                    unparsed_samples_left = 3
+                    last_msg_ts = time.time()
+                    last_event_ts = 0.0
 
                     def _want_assets() -> set[str]:
                         want = market_ids_provider() or []
@@ -136,8 +140,17 @@ class PolymarketClobWebSocketStream:
                         # The accepted shape is:
                         #   {"action":"subscribe","type":"MARKET","assets_ids":[...]}
                         # where `assets_ids` are CLOB token IDs.
-                        msg = {"action": "subscribe", "type": "MARKET", "assets_ids": list(new_assets)}
-                        await ws.send(json.dumps(msg))
+                        # Polymarket has changed this field name in the past; in the wild you can
+                        # see `asset_ids` or `assets_ids`. Sending both variants keeps us resilient
+                        # and makes failures non-silent because the server typically replies with
+                        # an error payload we now log.
+                        assets = list(new_assets)
+                        msgs = [
+                            {"action": "subscribe", "type": "MARKET", "asset_ids": assets},
+                            {"action": "subscribe", "type": "MARKET", "assets_ids": assets},
+                        ]
+                        for m in msgs:
+                            await ws.send(json.dumps(m))
                         subscribed_assets |= new_assets
                         self._log.info("ws.subscribed", assets=len(subscribed_assets))
 
@@ -179,8 +192,21 @@ class PolymarketClobWebSocketStream:
                             except Exception:
                                 continue
                             rx_msgs += 1
+                            last_msg_ts = time.time()
+
+                            # Surface server acks/errors; otherwise users see "connected" but no data.
+                            if isinstance(msg, dict):
+                                msg_lc = {str(k).lower(): v for k, v in msg.items()}
+                                if "error" in msg_lc or "errors" in msg_lc:
+                                    self._log.error("ws.server_error", payload=msg)
+                                elif any(k in msg_lc for k in ("subscribed", "unsubscribed", "status", "success", "message")):
+                                    # Some endpoints send an explicit ack after subscribe.
+                                    self._log.info("ws.server_msg", payload=msg)
+
                             evs = list(_normalize_ws_payload(msg, asset_to_market_id=asset_to_market_id))
                             rx_events += len(evs)
+                            if evs:
+                                last_event_ts = time.time()
                             now = time.time()
                             if (now - last_rx_log_ts) >= 30.0:
                                 last_rx_log_ts = now
@@ -196,6 +222,29 @@ class PolymarketClobWebSocketStream:
                                     message="websocket receiving",
                                     detail=f"msgs={rx_msgs} events={rx_events} assets={len(subscribed_assets)}",
                                     ts=now,
+                                )
+
+                            # If we aren't able to parse anything, emit a few samples so we can
+                            # quickly update the normalizer for Polymarket's current schema.
+                            if not evs and unparsed_samples_left > 0:
+                                unparsed_samples_left -= 1
+                                try:
+                                    # Keep logs bounded: keys + truncated JSON.
+                                    keys = sorted(list(msg.keys())) if isinstance(msg, dict) else None
+                                    raw_preview = json.dumps(msg)[:1200]
+                                except Exception:
+                                    keys = None
+                                    raw_preview = str(msg)[:1200]
+                                self._log.warning("ws.unparsed_payload", keys=keys, preview=raw_preview)
+
+                            # Watchdog: if we have subscriptions but haven't parsed any events,
+                            # make it obvious (helps when protocol changed and we only get acks).
+                            if subscribed_assets and rx_msgs >= 1 and rx_events == 0 and (now - last_msg_ts) > 20.0:
+                                self._log.warning(
+                                    "ws.no_events_yet",
+                                    assets=len(subscribed_assets),
+                                    secs_since_last_msg=round(now - last_msg_ts, 1),
+                                    secs_since_connect=None,
                                 )
 
                             for ev in evs:
@@ -327,9 +376,11 @@ def _normalize_ws_message(
             except Exception:
                 return None
 
-    # /ws/market snapshot payloads: {market:"0x..", asset_id:"..", bids:[{price,size}], asks:[{price,size}]}
+    # /ws/market snapshot payloads often include price level arrays. Field names vary:
+    # - bids/asks (common)
+    # - buys/sells (also common)
     # Compute best bid/ask from arrays.
-    if isinstance(data.get("bids"), list) or isinstance(data.get("asks"), list):
+    if any(isinstance(data.get(k), list) for k in ("bids", "asks", "buys", "sells")):
         asset_id = data.get("asset_id") or data.get("assetId") or data.get("asset") or None
         if asset_id is not None:
             asset_id = str(asset_id)
@@ -337,18 +388,22 @@ def _normalize_ws_message(
         market_id = str(mapped_market_id or market_id_direct or "")
         if market_id:
             try:
-                bids = data.get("bids") or []
-                asks = data.get("asks") or []
+                bids = data.get("bids") or data.get("buys") or []
+                asks = data.get("asks") or data.get("sells") or []
                 best_bid = None
                 best_bid_sz = None
                 best_ask = None
                 best_ask_sz = None
 
                 def _lvl_to_px_sz(lvl) -> tuple[float | None, float | None]:
-                    if not isinstance(lvl, dict):
+                    # Levels can be dicts {"price":"0.49","size":"10"} or arrays ["0.49","10"].
+                    if isinstance(lvl, (list, tuple)) and len(lvl) >= 2:
+                        px, sz = lvl[0], lvl[1]
+                    elif isinstance(lvl, dict):
+                        px = lvl.get("price") if "price" in lvl else lvl.get("p")
+                        sz = lvl.get("size") if "size" in lvl else lvl.get("s")
+                    else:
                         return None, None
-                    px = lvl.get("price")
-                    sz = lvl.get("size")
                     try:
                         px_f = float(px) if px is not None else None
                     except Exception:
