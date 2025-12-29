@@ -74,6 +74,8 @@ class RiskEngine:
 
         c = self.circuit_ok(tob)
         if not c.ok:
+            now = time.time()
+            tob_age = None if tob is None else float(now - float(tob.ts))
             self._maybe_log_reject(
                 market_id=market_id,
                 side=side,
@@ -82,6 +84,7 @@ class RiskEngine:
                     "tob_best_bid": None if tob is None else tob.best_bid,
                     "tob_best_ask": None if tob is None else tob.best_ask,
                     "tob_ts": None if tob is None else tob.ts,
+                    "tob_age_secs": tob_age,
                 },
             )
             return c

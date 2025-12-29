@@ -271,6 +271,14 @@ class Settings:
         if disallow_mock_data and polymarket_feed == "mock":
             raise ValueError("DISALLOW_MOCK_DATA=true but POLYMARKET_FEED resolved to 'mock' (set POLYMARKET_FEED=gamma|ws)")
 
+        # Circuit breaker defaults depend on feed characteristics:
+        # - gamma poll emits a BookEvent every poll tick, so a small lag threshold is appropriate.
+        # - ws feeds can be "quiet" per-market for long stretches (no book updates when price doesn't change),
+        #   even while the connection is healthy. Using a tiny default would cause false feed_lag rejects.
+        default_max_feed_lag_secs = 5.0
+        if polymarket_feed == "ws":
+            default_max_feed_lag_secs = 300.0
+
         return cls(
             trade_mode=trade_mode,
             run_mode=run_mode,
@@ -321,7 +329,7 @@ class Settings:
             daily_loss_limit=_get_float("DAILY_LOSS_LIMIT", 200.0),
             kill_switch=_get_bool("KILL_SWITCH", False),
             stop_before_end_secs=_get_float("STOP_BEFORE_END_SECS", 3600.0),
-            max_feed_lag_secs=_get_float("MAX_FEED_LAG_SECS", 5.0),
+            max_feed_lag_secs=_get_float("MAX_FEED_LAG_SECS", default_max_feed_lag_secs),
             max_spread=_get_float("MAX_SPREAD", 0.20),
             sqlite_path=_get_env("SQLITE_PATH", default_sqlite_path) or "",
             log_level=_get_env("LOG_LEVEL", "INFO") or "INFO",

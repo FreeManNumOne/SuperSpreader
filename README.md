@@ -57,6 +57,8 @@ To attempt live WebSocket streaming (best-effort, schema may require adjustment)
 USE_LIVE_WS_FEED=1 RUN_MODE=paper TRADE_MODE=paper python main.py
 ```
 
+If you see repeated `risk.reject` with reason `feed_lag` while the WS is clearly receiving data, increase `MAX_FEED_LAG_SECS` (WS markets can be quiet for minutes). A reasonable starting point is `MAX_FEED_LAG_SECS=300`.
+
 ### Run: replay backtest from recorded tape
 
 ```bash
