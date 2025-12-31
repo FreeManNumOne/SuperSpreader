@@ -1,0 +1,33 @@
+ [package]
+ name = "superspreader"
+ version = "0.1.0"
+ edition = "2021"
+ license = "MIT"
+ publish = false
+ 
+ [dependencies]
+ anyhow = "1.0"
+ axum = { version = "0.8", features = ["macros"] }
+ chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+ clap = { version = "4.5", features = ["derive", "env"] }
+ env_logger = "0.11"
+ log = "0.4"
+ parking_lot = "0.12"
+ rand = "0.9"
+ rand_distr = "0.5"
+ rusqlite = { version = "0.32", features = ["bundled"] }
+ serde = { version = "1.0", features = ["derive"] }
+ serde_json = "1.0"
+ tokio = { version = "1.43", features = ["macros", "rt-multi-thread", "signal", "time"] }
+ tower-http = { version = "0.6", features = ["cors"] }
+ uuid = { version = "1.11", features = ["v4", "fast-rng"] }
+ 
+ # Core Polymarket low-latency clients (WS, Gamma, etc.)
+ polymarket-hft = "0.0.6"
+
+# Pin transitive deps to avoid edition2024 (Cargo 1.82 compatibility).
+base64ct = "=1.7.1"
+ 
+ [profile.release]
+ lto = true
+ codegen-units = 1
