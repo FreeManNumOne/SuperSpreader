@@ -245,8 +245,8 @@
              };
  
              let ts = parse_ws_ts(&b.timestamp).unwrap_or_else(now_ts);
-             let (best_bid, bid_depth_5) = parse_side_levels(&b.bids);
-             let (best_ask, ask_depth_5) = parse_side_levels(&b.asks);
+            let (best_bid, bid_depth_5) = parse_side_levels(&b.bids, true);
+            let (best_ask, ask_depth_5) = parse_side_levels(&b.asks, false);
  
              let prev = state.get(&mid);
              let prev_updates = prev.as_ref().map(|x| x.updates_ewma_per_min).unwrap_or(0.0);
@@ -374,8 +374,8 @@
              };
              let Some(market_id) = mid else { continue; };
  
-             let (best_bid, bid_depth_5) = parse_side_levels_ob(&b.bids);
-             let (best_ask, ask_depth_5) = parse_side_levels_ob(&b.asks);
+            let (best_bid, bid_depth_5) = parse_side_levels_ob(&b.bids, true);
+            let (best_ask, ask_depth_5) = parse_side_levels_ob(&b.asks, false);
  
              // Preserve book update EWMA and trade EMA, but refresh the timestamp.
              let prev = state.get(&market_id);
@@ -420,36 +420,67 @@ fn build_orderbooks_request(tokens: &[String]) -> Vec<GetOrderBooksRequestItem> 
      }
  }
  
- fn parse_side_levels(levels: &[polymarket_hft::client::polymarket::clob::ws::WsPriceLevel]) -> (Option<f64>, f64) {
-     let mut best: Option<f64> = None;
-     let mut depth = 0.0;
-     for (i, lvl) in levels.iter().enumerate() {
-         let px = lvl.price.parse::<f64>().ok();
-         let sz = lvl.size.parse::<f64>().ok();
-         if i == 0 {
-             best = px;
-         }
-         if i < 5 {
-             depth += sz.unwrap_or(0.0);
-         }
-     }
-     (best, depth)
+fn parse_side_levels(
+    levels: &[polymarket_hft::client::polymarket::clob::ws::WsPriceLevel],
+    is_bid: bool,
+) -> (Option<f64>, f64) {
+    let mut parsed: Vec<(f64, f64)> = levels
+        .iter()
+        .filter_map(|lvl| {
+            let px = lvl.price.parse::<f64>().ok()?;
+            let sz = lvl.size.parse::<f64>().ok()?;
+            if !(px > 0.0) || !(sz > 0.0) {
+                return None;
+            }
+            Some((px, sz))
+        })
+        .collect();
+
+    if parsed.is_empty() {
+        return (None, 0.0);
+    }
+
+    // Be defensive: some feeds/APIs do not guarantee ordering.
+    if is_bid {
+        parsed.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    } else {
+        parsed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    }
+
+    let best = Some(parsed[0].0);
+    let depth = parsed.iter().take(5).map(|x| x.1).sum::<f64>();
+    (best, depth)
  }
  
- fn parse_side_levels_ob(levels: &[polymarket_hft::client::polymarket::clob::orderbook::PriceLevel]) -> (Option<f64>, f64) {
-     let mut best: Option<f64> = None;
-     let mut depth = 0.0;
-     for (i, lvl) in levels.iter().enumerate() {
-         let px = lvl.price.parse::<f64>().ok();
-         let sz = lvl.size.parse::<f64>().ok();
-         if i == 0 {
-             best = px;
-         }
-         if i < 5 {
-             depth += sz.unwrap_or(0.0);
-         }
-     }
-     (best, depth)
+fn parse_side_levels_ob(
+    levels: &[polymarket_hft::client::polymarket::clob::orderbook::PriceLevel],
+    is_bid: bool,
+) -> (Option<f64>, f64) {
+    let mut parsed: Vec<(f64, f64)> = levels
+        .iter()
+        .filter_map(|lvl| {
+            let px = lvl.price.parse::<f64>().ok()?;
+            let sz = lvl.size.parse::<f64>().ok()?;
+            if !(px > 0.0) || !(sz > 0.0) {
+                return None;
+            }
+            Some((px, sz))
+        })
+        .collect();
+
+    if parsed.is_empty() {
+        return (None, 0.0);
+    }
+
+    if is_bid {
+        parsed.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    } else {
+        parsed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    }
+
+    let best = Some(parsed[0].0);
+    let depth = parsed.iter().take(5).map(|x| x.1).sum::<f64>();
+    (best, depth)
  }
 
 #[cfg(test)]
@@ -534,5 +565,28 @@ mod tests {
         assert!(tob3.last_trade_ema.is_some());
         assert!(tob3.last_trade_ts.is_some());
         assert_eq!(tob3.ts, tob2.ts, "last trade should not overwrite book freshness ts");
+    }
+
+    #[test]
+    fn parse_side_levels_is_defensive_about_sorting() {
+        // Unsorted bids (worst first): should still pick best=max.
+        let bids = vec![
+            WsPriceLevel { price: "0.001".to_string(), size: "5".to_string() },
+            WsPriceLevel { price: "0.490".to_string(), size: "10".to_string() },
+            WsPriceLevel { price: "0.480".to_string(), size: "7".to_string() },
+        ];
+        let (best_bid, depth_bid_5) = parse_side_levels(&bids, true);
+        assert_eq!(best_bid, Some(0.49));
+        assert!(depth_bid_5 > 0.0);
+
+        // Unsorted asks (worst first): should still pick best=min.
+        let asks = vec![
+            WsPriceLevel { price: "0.999".to_string(), size: "5".to_string() },
+            WsPriceLevel { price: "0.510".to_string(), size: "10".to_string() },
+            WsPriceLevel { price: "0.520".to_string(), size: "7".to_string() },
+        ];
+        let (best_ask, depth_ask_5) = parse_side_levels(&asks, false);
+        assert_eq!(best_ask, Some(0.51));
+        assert!(depth_ask_5 > 0.0);
     }
 }
