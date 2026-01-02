@@ -11,7 +11,6 @@
  
  use polymarket_hft::client::polymarket::clob::Client as ClobClient;
  use polymarket_hft::client::polymarket::clob::orderbook::GetOrderBooksRequestItem;
- use polymarket_hft::client::polymarket::clob::Side as ClobSide;
  use polymarket_hft::client::polymarket::clob::ws::ClobWsClient;
  use polymarket_hft::client::polymarket::clob::ws::WsMessage;
  use tokio::sync::watch;
@@ -343,11 +342,12 @@
              continue;
          }
  
-         // Batch request for speed.
-         let req = tokens
-             .iter()
-             .map(|t| GetOrderBooksRequestItem { token_id: t.clone(), side: Some(ClobSide::Buy) })
-             .collect::<Vec<_>>();
+        // Batch request for speed.
+        //
+        // IMPORTANT: do NOT set a side filter here.
+        // If we request only BUY (or only SELL), many markets will not have both sides populated,
+        // which in turn prevents computing a mid and causes the trading loop to skip quoting.
+        let req = build_orderbooks_request(&tokens);
  
          let books = match clob.get_order_books(&req).await {
              Ok(b) => b,
@@ -400,6 +400,13 @@
      }
  }
  
+fn build_orderbooks_request(tokens: &[String]) -> Vec<GetOrderBooksRequestItem> {
+    tokens
+        .iter()
+        .map(|t| GetOrderBooksRequestItem { token_id: t.clone(), side: None })
+        .collect::<Vec<_>>()
+}
+
  fn parse_ws_ts(s: &str) -> Option<f64> {
      let raw = s.trim().parse::<f64>().ok()?;
      // WS sometimes emits milliseconds; be defensive.
@@ -444,3 +451,55 @@
      }
      (best, depth)
  }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use polymarket_hft::client::polymarket::clob::ws::{BookMessage, WsPriceLevel};
+
+    #[test]
+    fn orderbook_poll_request_has_no_side_filter() {
+        let tokens = vec!["t1".to_string(), "t2".to_string(), "t3".to_string()];
+        let req = build_orderbooks_request(&tokens);
+        assert_eq!(req.len(), 3);
+        for r in req {
+            assert!(r.side.is_none(), "poll request must not set side filter");
+        }
+    }
+
+    #[test]
+    fn ws_book_message_updates_tob_state_with_bid_ask() {
+        let state = FeedState::new();
+        let routes = std::sync::Arc::new(RwLock::new(Routes::default()));
+
+        // Route a condition id to a numeric market id (what the rest of the bot uses).
+        routes
+            .write()
+            .by_condition
+            .insert("0xcond".to_string(), "516926".to_string());
+
+        let msg = WsMessage::Book(BookMessage {
+            event_type: "book".to_string(),
+            asset_id: "token_yes".to_string(),
+            market: "0xcond".to_string(),
+            bids: vec![
+                WsPriceLevel { price: "0.49".to_string(), size: "10".to_string() },
+                WsPriceLevel { price: "0.48".to_string(), size: "5".to_string() },
+            ],
+            asks: vec![
+                WsPriceLevel { price: "0.51".to_string(), size: "9".to_string() },
+                WsPriceLevel { price: "0.52".to_string(), size: "4".to_string() },
+            ],
+            timestamp: "1700000000000".to_string(), // ms
+            hash: "h".to_string(),
+        });
+
+        let mut last_update_ts: HashMap<String, f64> = HashMap::new();
+        handle_ws_message(&state, &routes, &mut last_update_ts, msg).unwrap();
+
+        let tob = state.get("516926").expect("tob should be upserted");
+        assert_eq!(tob.best_bid, Some(0.49));
+        assert_eq!(tob.best_ask, Some(0.51));
+        assert!(tob.mid().is_some());
+    }
+}
