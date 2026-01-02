@@ -1,86 +1,89 @@
- use std::net::SocketAddr;
- 
- use anyhow::Result;
- use axum::{
-     extract::{Query, State},
-     http::StatusCode,
-     response::{Html, IntoResponse, Json},
-     routing::{get, post},
-     Router,
- };
- use serde::Deserialize;
- use serde_json::Value as JsonValue;
- 
- use crate::{config::Settings, store::SqliteStore};
- 
- #[derive(Clone)]
- pub struct DashboardState {
-     pub settings: Settings,
-     pub store: SqliteStore,
- }
- 
- pub async fn serve_dashboard(settings: Settings, store: SqliteStore) -> Result<()> {
-     let state = DashboardState { settings: settings.clone(), store };
- 
-     let app = Router::new()
-         .route("/", get(index))
-         .route("/api/summary", get(api_summary))
-         .route("/api/health", get(api_health))
-         .route("/api/watchlist", get(api_watchlist))
-         .route("/api/positions", get(api_positions))
-         .route("/api/orders", get(api_orders))
-         .route("/api/open_orders", get(api_open_orders))
-         .route("/api/quotes", get(api_quotes))
-         .route("/api/fills", get(api_fills))
-         .route("/api/publishers", get(api_publishers))
-         .route("/api/admin/reset_paper_state", post(api_reset_paper_state))
-         .with_state(state);
- 
-     let addr: SocketAddr = format!("{}:{}", settings.dashboard_host, settings.dashboard_port)
-         .parse()
-         .expect("dashboard addr parse");
- 
-     log::info!("dashboard.start url=http://{}", addr);
-     let listener = tokio::net::TcpListener::bind(addr).await?;
-     axum::serve(listener, app).await?;
-     Ok(())
- }
- 
- async fn index(State(st): State<DashboardState>) -> impl IntoResponse {
-     let host = st.settings.dashboard_host.clone();
-     let port = st.settings.dashboard_port;
-     let mode = st.settings.run_mode.clone();
-     let trade_mode = st.settings.trade_mode.clone();
-     let sqlite_path = st.store.path().to_string();
-     let can_reset = trade_mode == "paper" && st.settings.dashboard_enable_reset;
-     Html(render_index_html(
-         &host,
-         port,
-         &mode,
-         &trade_mode,
-         &sqlite_path,
-         can_reset,
-     ))
- }
- 
- fn render_index_html(
-     host: &str,
-     port: u16,
-     mode: &str,
-     trade_mode: &str,
-     sqlite_path: &str,
-     can_reset: bool,
- ) -> String {
-     // This is intentionally kept as a single-file UI (no build step),
-     // lifted from the existing Python dashboard so you can keep the same look & feel.
-     let reset_btn = if can_reset {
-         r#"<button class="btn" id="resetBtn" style="border-color: rgba(255,77,77,0.45);">Reset paper state</button>"#
-     } else {
-         ""
-     };
- 
-     format!(
-         r#"<!doctype html>
+use std::net::SocketAddr;
+
+use anyhow::Result;
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::{Html, IntoResponse, Json},
+    routing::{get, post},
+    Router,
+};
+use serde::Deserialize;
+use serde_json::Value as JsonValue;
+
+use crate::{config::Settings, store::SqliteStore};
+
+#[derive(Clone)]
+pub struct DashboardState {
+    pub settings: Settings,
+    pub store: SqliteStore,
+}
+
+pub async fn serve_dashboard(settings: Settings, store: SqliteStore) -> Result<()> {
+    let state = DashboardState {
+        settings: settings.clone(),
+        store,
+    };
+
+    let app = Router::new()
+        .route("/", get(index))
+        .route("/api/summary", get(api_summary))
+        .route("/api/health", get(api_health))
+        .route("/api/watchlist", get(api_watchlist))
+        .route("/api/positions", get(api_positions))
+        .route("/api/orders", get(api_orders))
+        .route("/api/open_orders", get(api_open_orders))
+        .route("/api/quotes", get(api_quotes))
+        .route("/api/fills", get(api_fills))
+        .route("/api/publishers", get(api_publishers))
+        .route("/api/admin/reset_paper_state", post(api_reset_paper_state))
+        .with_state(state);
+
+    let addr: SocketAddr = format!("{}:{}", settings.dashboard_host, settings.dashboard_port)
+        .parse()
+        .expect("dashboard addr parse");
+
+    log::info!("dashboard.start url=http://{}", addr);
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+async fn index(State(st): State<DashboardState>) -> impl IntoResponse {
+    let host = st.settings.dashboard_host.clone();
+    let port = st.settings.dashboard_port;
+    let mode = st.settings.run_mode.clone();
+    let trade_mode = st.settings.trade_mode.clone();
+    let sqlite_path = st.store.path().to_string();
+    let can_reset = trade_mode == "paper" && st.settings.dashboard_enable_reset;
+    Html(render_index_html(
+        &host,
+        port,
+        &mode,
+        &trade_mode,
+        &sqlite_path,
+        can_reset,
+    ))
+}
+
+fn render_index_html(
+    host: &str,
+    port: u16,
+    mode: &str,
+    trade_mode: &str,
+    sqlite_path: &str,
+    can_reset: bool,
+) -> String {
+    // This is intentionally kept as a single-file UI (no build step),
+    // lifted from the existing Python dashboard so you can keep the same look & feel.
+    let reset_btn = if can_reset {
+        r#"<button class="btn" id="resetBtn" style="border-color: rgba(255,77,77,0.45);">Reset paper state</button>"#
+    } else {
+        ""
+    };
+
+    format!(
+        r#"<!doctype html>
  <html lang="en">
    <head>
      <meta charset="utf-8" />
@@ -823,171 +826,195 @@
      </script>
    </body>
  </html>"#,
-         host = host,
-         port = port,
-         mode = mode,
-         trade_mode = trade_mode,
-         sqlite_path = sqlite_path,
-         reset_btn = reset_btn
-     )
- }
- 
- async fn api_summary(State(st): State<DashboardState>) -> impl IntoResponse {
-     let ts = now_ts();
-     let pnl = st.store.fetch_latest_pnl().unwrap_or(None);
-     let scanner = st.store.fetch_latest_scanner_snapshot().unwrap_or(None);
-     let positions = st.store.fetch_latest_positions(500).unwrap_or_default();
-     let health = st.store.fetch_runtime_statuses().unwrap_or_else(|_| serde_json::json!({}));
- 
-     let blocking = health
-         .as_object()
-         .map(|m| {
-             m.values()
-                 .filter(|v| v.get("level").and_then(|x| x.as_str()) == Some("error"))
-                 .cloned()
-                 .collect::<Vec<_>>()
-         })
-         .unwrap_or_default();
- 
-     let positions_count = positions
-         .iter()
-         .filter(|p| p.get("position").and_then(|x| x.as_f64()).unwrap_or(0.0) != 0.0)
-         .count();
- 
-     let freshness = serde_json::json!({
-         "markets_updated_ts": st.store.fetch_latest_market_update_ts().ok().flatten(),
-         "tape_latest_ts": st.store.fetch_latest_tape_ts().ok().flatten(),
-     });
- 
-     Json(serde_json::json!({
-         "ts": ts,
-         "mode": st.settings.run_mode,
-         "trade_mode": st.settings.trade_mode,
-         "pnl": pnl,
-         "scanner": scanner,
-         "positions_count": positions_count,
-         "freshness": freshness,
-         "health": {
-             "components": health,
-             "blocking": blocking,
-         }
-     }))
- }
- 
- async fn api_health(State(st): State<DashboardState>) -> impl IntoResponse {
-     let ts = now_ts();
-     let health = st.store.fetch_runtime_statuses().unwrap_or_else(|_| serde_json::json!({}));
-     Json(serde_json::json!({ "ts": ts, "components": health }))
- }
- 
- #[derive(Deserialize)]
- struct LimitQ {
-     limit: Option<usize>,
- }
- 
- async fn api_watchlist(State(st): State<DashboardState>, Query(q): Query<LimitQ>) -> impl IntoResponse {
-     let limit = q.limit.unwrap_or(30);
-     match st.store.fetch_watchlist(limit) {
-         Ok(rows) => Json(JsonValue::Array(rows)).into_response(),
-         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-     }
- }
- 
- #[derive(Deserialize)]
- struct PositionsQ {
-     limit: Option<usize>,
-     only_flat: Option<i32>,
- }
- 
- async fn api_positions(State(st): State<DashboardState>, Query(q): Query<PositionsQ>) -> impl IntoResponse {
-     let limit = q.limit.unwrap_or(25);
-     let only_flat = q.only_flat.unwrap_or(0) == 1;
-     match st.store.fetch_latest_positions(limit) {
-         Ok(rows) => {
-             let filtered = if only_flat {
-                 rows.into_iter()
-                     .filter(|r| {
-                         r.get("position").and_then(|x| x.as_f64()).unwrap_or(0.0) == 0.0
-                             && r.get("realized_pnl").and_then(|x| x.as_f64()).unwrap_or(0.0) != 0.0
-                     })
-                     .collect::<Vec<_>>()
-             } else {
-                 rows.into_iter()
-                     .filter(|r| r.get("position").and_then(|x| x.as_f64()).unwrap_or(0.0) != 0.0)
-                     .collect::<Vec<_>>()
-             };
-             Json(JsonValue::Array(filtered)).into_response()
-         }
-         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-     }
- }
- 
- async fn api_orders(State(st): State<DashboardState>, Query(q): Query<LimitQ>) -> impl IntoResponse {
-     let limit = q.limit.unwrap_or(50);
-     match st.store.fetch_recent_orders(limit, None) {
-         Ok(rows) => Json(JsonValue::Array(rows)).into_response(),
-         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-     }
- }
- 
- async fn api_open_orders(State(st): State<DashboardState>, Query(q): Query<LimitQ>) -> impl IntoResponse {
-     let limit = q.limit.unwrap_or(50);
-     match st.store.fetch_recent_orders(limit, Some("open")) {
-         Ok(rows) => Json(JsonValue::Array(rows)).into_response(),
-         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-     }
- }
- 
- async fn api_quotes(State(st): State<DashboardState>, Query(q): Query<LimitQ>) -> impl IntoResponse {
-     let limit = q.limit.unwrap_or(25);
-     match st.store.fetch_latest_quotes(limit) {
-         Ok(rows) => Json(JsonValue::Array(rows)).into_response(),
-         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-     }
- }
- 
- async fn api_fills(State(st): State<DashboardState>, Query(q): Query<LimitQ>) -> impl IntoResponse {
-     let limit = q.limit.unwrap_or(100);
-     match st.store.fetch_recent_fills(limit) {
-         Ok(rows) => Json(JsonValue::Array(rows)).into_response(),
-         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-     }
- }
- 
- async fn api_publishers() -> impl IntoResponse {
-     // The old Python app supported optional GitHub gist/repo publishing.
-     // This Rust port intentionally keeps the dashboard UI but does not publish by default.
-     Json(serde_json::json!({}))
- }
- 
- async fn api_reset_paper_state(State(st): State<DashboardState>) -> impl IntoResponse {
-     if st.settings.trade_mode != "paper" {
-         return (
-             StatusCode::BAD_REQUEST,
-             Json(serde_json::json!({"ok": false, "error": "reset_only_allowed_in_paper_mode"})),
-         )
-             .into_response();
-     }
-     if !st.settings.dashboard_enable_reset {
-         return (
-             StatusCode::FORBIDDEN,
-             Json(serde_json::json!({"ok": false, "error": "reset_disabled"})),
-         )
-             .into_response();
-     }
-     if let Err(e) = st.store.clear_trading_state() {
-         return (
-             StatusCode::INTERNAL_SERVER_ERROR,
-             Json(serde_json::json!({"ok": false, "error": e.to_string()})),
-         )
-             .into_response();
-     }
-     Json(serde_json::json!({"ok": true, "ts": now_ts()})).into_response()
- }
- 
- fn now_ts() -> f64 {
-     let now = std::time::SystemTime::now()
-         .duration_since(std::time::UNIX_EPOCH)
-         .unwrap_or_default();
-     now.as_secs_f64()
- }
+        host = host,
+        port = port,
+        mode = mode,
+        trade_mode = trade_mode,
+        sqlite_path = sqlite_path,
+        reset_btn = reset_btn
+    )
+}
+
+async fn api_summary(State(st): State<DashboardState>) -> impl IntoResponse {
+    let ts = now_ts();
+    let pnl = st.store.fetch_latest_pnl().unwrap_or(None);
+    let scanner = st.store.fetch_latest_scanner_snapshot().unwrap_or(None);
+    let positions = st.store.fetch_latest_positions(500).unwrap_or_default();
+    let health = st
+        .store
+        .fetch_runtime_statuses()
+        .unwrap_or_else(|_| serde_json::json!({}));
+
+    let blocking = health
+        .as_object()
+        .map(|m| {
+            m.values()
+                .filter(|v| v.get("level").and_then(|x| x.as_str()) == Some("error"))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let positions_count = positions
+        .iter()
+        .filter(|p| p.get("position").and_then(|x| x.as_f64()).unwrap_or(0.0) != 0.0)
+        .count();
+
+    let freshness = serde_json::json!({
+        "markets_updated_ts": st.store.fetch_latest_market_update_ts().ok().flatten(),
+        "tape_latest_ts": st.store.fetch_latest_tape_ts().ok().flatten(),
+    });
+
+    Json(serde_json::json!({
+        "ts": ts,
+        "mode": st.settings.run_mode,
+        "trade_mode": st.settings.trade_mode,
+        "pnl": pnl,
+        "scanner": scanner,
+        "positions_count": positions_count,
+        "freshness": freshness,
+        "health": {
+            "components": health,
+            "blocking": blocking,
+        }
+    }))
+}
+
+async fn api_health(State(st): State<DashboardState>) -> impl IntoResponse {
+    let ts = now_ts();
+    let health = st
+        .store
+        .fetch_runtime_statuses()
+        .unwrap_or_else(|_| serde_json::json!({}));
+    Json(serde_json::json!({ "ts": ts, "components": health }))
+}
+
+#[derive(Deserialize)]
+struct LimitQ {
+    limit: Option<usize>,
+}
+
+async fn api_watchlist(
+    State(st): State<DashboardState>,
+    Query(q): Query<LimitQ>,
+) -> impl IntoResponse {
+    let limit = q.limit.unwrap_or(30);
+    match st.store.fetch_watchlist(limit) {
+        Ok(rows) => Json(JsonValue::Array(rows)).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct PositionsQ {
+    limit: Option<usize>,
+    only_flat: Option<i32>,
+}
+
+async fn api_positions(
+    State(st): State<DashboardState>,
+    Query(q): Query<PositionsQ>,
+) -> impl IntoResponse {
+    let limit = q.limit.unwrap_or(25);
+    let only_flat = q.only_flat.unwrap_or(0) == 1;
+    match st.store.fetch_latest_positions(limit) {
+        Ok(rows) => {
+            let filtered = if only_flat {
+                rows.into_iter()
+                    .filter(|r| {
+                        r.get("position").and_then(|x| x.as_f64()).unwrap_or(0.0) == 0.0
+                            && r.get("realized_pnl")
+                                .and_then(|x| x.as_f64())
+                                .unwrap_or(0.0)
+                                != 0.0
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                rows.into_iter()
+                    .filter(|r| r.get("position").and_then(|x| x.as_f64()).unwrap_or(0.0) != 0.0)
+                    .collect::<Vec<_>>()
+            };
+            Json(JsonValue::Array(filtered)).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn api_orders(
+    State(st): State<DashboardState>,
+    Query(q): Query<LimitQ>,
+) -> impl IntoResponse {
+    let limit = q.limit.unwrap_or(50);
+    match st.store.fetch_recent_orders(limit, None) {
+        Ok(rows) => Json(JsonValue::Array(rows)).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn api_open_orders(
+    State(st): State<DashboardState>,
+    Query(q): Query<LimitQ>,
+) -> impl IntoResponse {
+    let limit = q.limit.unwrap_or(50);
+    match st.store.fetch_recent_orders(limit, Some("open")) {
+        Ok(rows) => Json(JsonValue::Array(rows)).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn api_quotes(
+    State(st): State<DashboardState>,
+    Query(q): Query<LimitQ>,
+) -> impl IntoResponse {
+    let limit = q.limit.unwrap_or(25);
+    match st.store.fetch_latest_quotes(limit) {
+        Ok(rows) => Json(JsonValue::Array(rows)).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn api_fills(State(st): State<DashboardState>, Query(q): Query<LimitQ>) -> impl IntoResponse {
+    let limit = q.limit.unwrap_or(100);
+    match st.store.fetch_recent_fills(limit) {
+        Ok(rows) => Json(JsonValue::Array(rows)).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn api_publishers() -> impl IntoResponse {
+    // The old Python app supported optional GitHub gist/repo publishing.
+    // This Rust port intentionally keeps the dashboard UI but does not publish by default.
+    Json(serde_json::json!({}))
+}
+
+async fn api_reset_paper_state(State(st): State<DashboardState>) -> impl IntoResponse {
+    if st.settings.trade_mode != "paper" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"ok": false, "error": "reset_only_allowed_in_paper_mode"})),
+        )
+            .into_response();
+    }
+    if !st.settings.dashboard_enable_reset {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"ok": false, "error": "reset_disabled"})),
+        )
+            .into_response();
+    }
+    if let Err(e) = st.store.clear_trading_state() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"ok": false, "error": e.to_string()})),
+        )
+            .into_response();
+    }
+    Json(serde_json::json!({"ok": true, "ts": now_ts()})).into_response()
+}
+
+fn now_ts() -> f64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    now.as_secs_f64()
+}

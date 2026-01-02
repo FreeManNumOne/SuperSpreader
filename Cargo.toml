@@ -31,3 +31,9 @@ base64ct = "=1.7.1"
  [profile.release]
  lto = true
  codegen-units = 1
+
+# Windows stability: avoid compiling build-deps/proc-macros optimized in --release,
+# which has been associated with unstable toolchain crashes (e.g., heap corruption).
+[profile.release.build-override]
+opt-level = 0
+codegen-units = 16
